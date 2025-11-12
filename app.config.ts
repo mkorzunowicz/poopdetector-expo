@@ -1,0 +1,86 @@
+import { ConfigContext, ExpoConfig } from 'expo/config';
+
+export default ({ config }: ConfigContext): ExpoConfig => ({
+  ...config,
+    name: 'Poop Detector',
+    slug: 'poop-detector',
+    version: '1.0.0',
+    orientation: 'portrait',
+    icon: './assets/images/icon.png',
+    scheme: 'poop-detector',
+    userInterfaceStyle: 'automatic',
+    owner: 'ugs',
+    newArchEnabled: true,
+    ios: {
+        supportsTablet: true,
+        bundleIdentifier: 'com.ugs.poopdetector',
+        infoPlist: {
+        NSCameraUsageDescription: 'This app needs access to your camera to take photos for poop detection.',
+        NSPhotoLibraryUsageDescription: 'This app needs access to your photo library to select photos.',
+        NSPhotoLibraryAddUsageDescription: 'This app needs access to save photos to your photo library.',
+        },
+    },
+    android: {
+        softwareKeyboardLayoutMode: 'pan',
+        adaptiveIcon: {
+        foregroundImage: './assets/images/detector-icon.png',
+        backgroundColor: '#ffffff',
+        },
+        package: 'com.ugs.poopdetector',
+        permissions: [
+        'android.permission.CAMERA',
+        'android.permission.READ_EXTERNAL_STORAGE',
+        'android.permission.WRITE_EXTERNAL_STORAGE',
+        'android.permission.READ_MEDIA_IMAGES',
+        'android.permission.RECORD_AUDIO',
+        ],
+    },
+    web: {
+        bundler: 'metro',
+        output: 'single',
+        favicon: './assets/images/favicon.png',
+    },
+    plugins: [
+        'expo-router',
+        [
+        "react-native-vision-camera",
+        {
+          cameraPermissionText: "This app needs needs access to your Camera.",
+          enableCodeScanner: false,
+          enableFrameProcessors: true
+        }
+      ],
+        [
+        'expo-image-picker',
+        {
+            photosPermission: 'This app needs access to your photos.',
+            cameraPermission: 'This app needs access to your camera for poop detection.',
+        },
+        ],
+        [
+        'expo-splash-screen',
+        {
+            image: './assets/images/detector-icon.png',
+            imageWidth: 200,
+            resizeMode: 'contain',
+            backgroundColor: '#ffffff',
+        },
+        ],
+        ['expo-build-properties'],
+        'expo-localization',
+        [
+        "react-native-fast-tflite",
+        {
+            "enableCoreMLDelegate": true,        
+            "enableAndroidGpuLibraries": true
+        }
+        ]
+    ],
+    experiments: {
+        typedRoutes: true,
+    },
+    extra: {
+        router: {},
+        scheme: 'poop-detector',
+    }
+});

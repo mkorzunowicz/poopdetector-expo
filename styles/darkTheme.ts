@@ -1,0 +1,130 @@
+const darkTheme = {
+    name: "dark",
+    colors: {
+        primary: "#043F32",
+        secondary: "#1E1E1E",
+        textPrimary: "#FFFFFF",
+        textSecondary: "#A0A0A0",
+        textTertiary: "#fff",
+        textQuaternary: "#888",
+        textQuinary: "#0A2533",
+        backgroundPrimary: "#0A2533",
+        backgroundSecondary: "#232D32",
+        backgroundTertiary: "#404040",
+        backgroundQuaternary: "#232D32",
+        backgroundQuinary: "#232D32",
+        borderPrimary: "#e6ebf2",
+        borderSecondary: "#e6ebf2",
+        border: "#404040",
+        white: "#fff",
+        black: "#000",
+        gray: "#666",
+        error: "#FF4D4F",
+        success: "#52C41A",
+        warning: "#FAAD14",
+        inputBackground: "#232D32",
+    },
+    fonts: {
+        regular: "Poppins_400Regular",
+        medium: "Poppins_500Medium",
+        semiBold: "Poppins_600SemiBold",
+        bold: "Poppins_700Bold",
+    },
+    spacing: {
+        small: 8,
+        medium: 16,
+        large: 24,
+    },
+    fontSize: {
+        small: 14,
+        medium: 16,
+        large: 18,
+        title: 24,
+    },
+    borderRadius: {
+        small: 8,
+        medium: 16,
+        large: 24,
+    },
+    mapstyle: [
+        { elementType: "geometry", stylers: [{ color: "#242f3e" }] },
+        { elementType: "labels.text.stroke", stylers: [{ color: "#242f3e" }] },
+        { elementType: "labels.text.fill", stylers: [{ color: "#746855" }] },
+        {
+            featureType: "administrative.locality",
+            elementType: "labels.text.fill",
+            stylers: [{ color: "#d59563" }],
+        },
+        {
+            featureType: "poi",
+            stylers: [{ visibility: "off" }],
+        },
+        {
+            featureType: "poi.park",
+            elementType: "geometry",
+            stylers: [{ color: "#263c3f" }],
+        },
+        {
+            featureType: "poi.park",
+            elementType: "labels.text.fill",
+            stylers: [{ color: "#6b9a76" }],
+        },
+        {
+            featureType: "road",
+            elementType: "geometry",
+            stylers: [{ color: "#38414e" }],
+        },
+        {
+            featureType: "road",
+            elementType: "geometry.stroke",
+            stylers: [{ color: "#212a37" }],
+        },
+        {
+            featureType: "road",
+            elementType: "labels.text.fill",
+            stylers: [{ color: "#9ca5b3" }],
+        },
+        {
+            featureType: "road.highway",
+            elementType: "geometry",
+            stylers: [{ color: "#746855" }],
+        },
+        {
+            featureType: "road.highway",
+            elementType: "geometry.stroke",
+            stylers: [{ color: "#1f2835" }],
+        },
+        {
+            featureType: "road.highway",
+            elementType: "labels.text.fill",
+            stylers: [{ color: "#f3d19c" }],
+        },
+        {
+            featureType: "transit",
+            elementType: "geometry",
+            stylers: [{ color: "#2f3948" }],
+        },
+        {
+            featureType: "transit.station",
+            elementType: "labels.text.fill",
+            stylers: [{ color: "#d59563" }],
+        },
+        {
+            featureType: "water",
+            elementType: "geometry",
+            stylers: [{ color: "#17263c" }],
+        },
+        {
+            featureType: "water",
+            elementType: "labels.text.fill",
+            stylers: [{ color: "#515c6d" }],
+        },
+        {
+            featureType: "water",
+            elementType: "labels.text.stroke",
+            stylers: [{ color: "#17263c" }],
+        },
+    ],
+};
+
+export default darkTheme;
