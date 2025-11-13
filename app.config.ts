@@ -16,6 +16,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
         bundleIdentifier: 'com.ugs.poopdetector',
         infoPlist: {
         NSCameraUsageDescription: 'This app needs access to your camera to take photos for poop detection.',
+        NSMicrophoneUsageDescription: 'This app needs access to your microphone to record audio with videos.',
         NSPhotoLibraryUsageDescription: 'This app needs access to your photo library to select photos.',
         NSPhotoLibraryAddUsageDescription: 'This app needs access to save photos to your photo library.',
         },
@@ -62,7 +63,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
         {
           "ios": {
             "backgroundColor": "#000",
-            "image": "./assets/images/splash-icon.png",
+            "image": "./assets/images/detector-splash.png",
             "resizeMode": "cover"
           },
           "android": {

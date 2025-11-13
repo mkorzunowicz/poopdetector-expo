@@ -193,7 +193,7 @@ function _postprocess(
     netSize
   )
 
-  console.log(`[YoloX] Generated ${proposals.length} proposals`)
+  // console.log(`[YoloX] Generated ${proposals.length} proposals`)
 
   // Apply NMS (matches C# NMSSortedBoxesOptimized)
   const picked: Detection[] = []
@@ -218,7 +218,7 @@ function _postprocess(
     }
   }
 
-  console.log(`[YoloX] After NMS: ${picked.length} detections kept`)
+  // console.log(`[YoloX] After NMS: ${picked.length} detections kept`)
   
   // Final reasonable limit on detections
   const finalDetections = picked.slice(0, 50) // Maximum 50 detections per frame

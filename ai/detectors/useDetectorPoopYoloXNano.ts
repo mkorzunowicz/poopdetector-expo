@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import { Platform } from 'react-native'
 import { useTensorflowModel } from 'react-native-fast-tflite'
 import { COCO_LABELS } from '../cocoLabels'
 import type { UseDetectorResult } from './types'
@@ -7,7 +8,8 @@ import { createYoloXNanoDetector } from './yoloxNanoDetector'
 export function useDetectorYoloXNanoPoop(resizeFn: any): UseDetectorResult {
   const modelHook = useTensorflowModel(
     require('../../assets/yolox_nano_poop_cropped_only_best_float32.tflite'),
-    // 'android-gpu'
+    
+    Platform.OS === 'ios' ? 'core-ml' : 'android-gpu' 
   )
 
   const detect = useMemo(() => {

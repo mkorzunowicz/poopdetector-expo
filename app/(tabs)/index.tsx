@@ -19,7 +19,7 @@ import { Worklets } from 'react-native-worklets-core'
 import { DETECTOR_NAMES, DetectorName, useDetector } from '@/ai/detectors'
 import { Detection } from '@/ai/detectors/types'
 import { useFocusEffect } from '@react-navigation/core'
-import { Dimensions, StyleSheet, Text, TouchableOpacity, View } from "react-native"
+import { Dimensions, Platform, StyleSheet, Text, TouchableOpacity, View } from "react-native"
 import { useResizePlugin } from 'vision-camera-resize-plugin'
 
 import { CaptureButton } from '@/components/buttons/CaptureButton'
@@ -236,9 +236,10 @@ const CameraPage: React.FC = () => {
       // console.log(`[FrameProcessor] Skipping - detect: ${!!detect}, ready: ${ready}`)
       return
     }
+    var targetFps = Platform.OS === 'ios' ? 5 : 1;
 
-    runAtTargetFps(1, () => {
-      // console.log(`[FrameProcessor] Running detection at targetFps 2`)
+    runAtTargetFps(targetFps, () => {
+      // console.log(`[FrameProcessor] Running detection at targetFps ${targetFps}`)
       const t0 = Date.now()
       const dets = detect(frame, device?.position == 'front')
       const totalTime = Date.now() - t0

@@ -21,7 +21,7 @@ export const BoundingBoxOverlay = React.memo(
     // Universal bounding box overlay - expects normalized [0,1] coordinates
     // The detector should handle all transformations and output screen-relative coordinates
     
-    console.log(`[Overlay] Simple mapping - view: ${viewWidth}x${viewHeight}, mirrored: ${mirrored}`)
+    // console.log(`[Overlay] Simple mapping - view: ${viewWidth}x${viewHeight}, mirrored: ${mirrored}`)
     
     const mapX = (x: number) => {
       // Normalized [0,1] coordinate -> screen pixel
