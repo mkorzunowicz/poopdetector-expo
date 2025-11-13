@@ -9,7 +9,7 @@ export function useDetectorYolov8(resizeFn: any): UseDetectorResult {
     require('../../assets/yolov8.tflite'),
     // { url: 'https://github.com/mkorzunowicz/tflite_models/raw/refs/heads/main/efficientdet_f32.tflite'},
 
-    // 'android-gpu'
+    'android-gpu'
   )
 
   const detect = useMemo(() => {

@@ -1,8 +1,8 @@
 import { getLocales } from 'expo-localization';
 
 import { translations } from "@/i18n/translations";
-import { I18n } from 'i18n-js';
 import { log } from '@/utils/logger';
+import { I18n } from 'i18n-js';
 
 // Extended translations that include both TypeScript and JSON loaded translations
 let extendedTranslations = { ...translations };
@@ -33,19 +33,6 @@ export async function loadAdditionalTranslations(languageCode: string, translati
   
   log.storage.info("Successfully loaded translations", { languageCode });
   return true;
-}
-
-// Function to load German translations from JSON file
-export async function loadGermanTranslations() {
-  try {
-    // Import the German translation JSON
-    const germanTranslations = require('./translations.de.json');
-    await loadAdditionalTranslations('de', germanTranslations);
-    return true;
-  } catch (error) {
-    log.storage.error("Failed to load German translations", { error });
-    return false;
-  }
 }
 
 // Function to get available languages (including dynamically loaded ones)

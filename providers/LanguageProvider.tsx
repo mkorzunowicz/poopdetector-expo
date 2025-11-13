@@ -1,9 +1,9 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import i18n from '@/i18n/i18n';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getLocales } from 'expo-localization';
-import i18n, { loadGermanTranslations } from '@/i18n/i18n';
+import React, { createContext, useContext, useEffect, useState } from 'react';
 
-export type LanguageCode = 'auto' | 'en' | 'pl' | 'de';
+export type LanguageCode = 'auto' | 'en' | 'pl';
 
 interface LanguageContextType {
   selectedLanguage: LanguageCode;
@@ -52,9 +52,6 @@ export const LanguageProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   useEffect(() => {
     const loadLanguagePreference = async () => {
       try {
-        // Load German translations first
-        await loadGermanTranslations();
-        
         const savedLanguage = await AsyncStorage.getItem(LANGUAGE_STORAGE_KEY);
         if (savedLanguage && (savedLanguage === 'auto' || savedLanguage === 'en' || savedLanguage === 'pl' || savedLanguage === 'de')) {
           setSelectedLanguage(savedLanguage as LanguageCode);
@@ -74,11 +71,6 @@ export const LanguageProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const setLanguage = async (language: LanguageCode) => {
     try {
-      // Load German translations if selecting German
-      if (language === 'de') {
-        await loadGermanTranslations();
-      }
-      
       // Save to AsyncStorage
       await AsyncStorage.setItem(LANGUAGE_STORAGE_KEY, language);
       

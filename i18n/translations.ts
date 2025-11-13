@@ -32,6 +32,7 @@ export const translations = {
     },
     Language: {
       system: "System Default",
+      auto: "Auto-detect",
       english: "English",
       polish: "Polski",
       german: "Deutsch"
@@ -91,7 +92,21 @@ export const translations = {
     },
     privacyPolicy: {
       title: "Privacy Policy"
-    }
+    },
+    Connectivity: {
+      title: "Connection Status",
+      offline: "Offline",
+      degraded: "Poor Connection",
+      offlineDescription: "No internet connection available",
+      degradedDescription: "Connection is slow or unstable",
+      recentIssues: "Recent Issues",
+      whatThisMeans: "What This Means",
+      offlineExplanation: "You're not connected to the internet",
+      degradedExplanation: "Your connection is experiencing issues",
+      whatYouCanDo: "What You Can Do",
+      offlineSuggestions: "Check your network settings",
+      degradedSuggestions: "Try moving to a better location"
+    },
   },
   pl: {
     Global: {
@@ -126,6 +141,7 @@ export const translations = {
     },
     Language: {
       system: "Domyślny systemu",
+      auto: "Wykryj automatycznie",
       english: "English",
       polish: "Polski",
       german: "Deutsch"
@@ -185,6 +201,20 @@ export const translations = {
     },
     privacyPolicy: {
       title: "Polityka Prywatności"
-    }
+    },
+    Connectivity: {
+      title: "Status Połączenia",
+      offline: "Offline",
+      degraded: "Słabe Połączenie",
+      offlineDescription: "Brak dostępu do internetu",
+      degradedDescription: "Połączenie jest wolne lub niestabilne",
+      recentIssues: "Ostatnie Problemy",
+      whatThisMeans: "Co To Oznacza",
+      offlineExplanation: "Nie masz połączenia z internetem",
+      degradedExplanation: "Twoje połączenie ma problemy",
+      whatYouCanDo: "Co Możesz Zrobić",
+      offlineSuggestions: "Sprawdź ustawienia sieci",
+      degradedSuggestions: "Spróbuj przenieść się w lepsze miejsce"
+    },
   },
 };

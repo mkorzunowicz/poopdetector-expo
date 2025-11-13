@@ -3,6 +3,93 @@
 import { Frame } from "react-native-vision-camera"
 import { Detection, modelToString } from "./types"
 
+/* ───────────────────── private helpers ──────────────────────── */
+
+const NUM_BBOX_FIELDS = 5
+const STRIDES = [8, 16, 32] as const
+
+/* grid cache (per net-size) */
+const _gridCache: Record<number, Array<{ cx: number; cy: number; s: number }>> =
+  {}
+
+function _getGrid(w: number, h: number) {
+  'worklet'
+  const key = w * 10000 + h
+  if (!_gridCache[key]) {
+    const cells: { cx: number; cy: number; s: number }[] = []
+    for (let sIdx = 0; sIdx < STRIDES.length; sIdx++) {
+      const s = STRIDES[sIdx]
+      const gw = w / s
+      const gh = h / s
+      for (let y = 0; y < gh; y++) {
+        for (let x = 0; x < gw; x++) {
+          cells.push({ cx: x, cy: y, s })
+        }
+      }
+    }
+    _gridCache[key] = cells
+  }
+  return _gridCache[key]!
+}
+
+function _postprocess(
+  tensor: Float32Array,
+  grid: readonly { cx: number; cy: number; s: number }[],
+  netSize: number,
+  numClasses: number,
+  confThr: number,
+  nmsThr: number,
+): Detection[] {
+  'worklet'
+
+  const stride = numClasses + NUM_BBOX_FIELDS
+  const anchors = grid.length
+  const boxes: Detection[] = []
+
+  for (let a = 0; a < anchors; a++) {
+    const g = grid[a]
+    const off = a * stride
+
+    const cx = (tensor[off + 0] + g.cx) * g.s
+    const cy = (tensor[off + 1] + g.cy) * g.s
+    const w  = Math.exp(tensor[off + 2]) * g.s
+    const h  = Math.exp(tensor[off + 3]) * g.s
+
+    const obj = tensor[off + 4]
+
+    let bestProb = 0
+    let bestCls  = 0
+    for (let c = 0; c < numClasses; c++) {
+      const p = tensor[off + NUM_BBOX_FIELDS + c] * obj
+      if (p > bestProb) { bestProb = p; bestCls = c }
+    }
+    if (bestProb < confThr) continue
+
+    boxes.push({
+      x1: (cx - w * 0.5) / netSize,
+      y1: (cy - h * 0.5) / netSize,
+      x2: (cx + w * 0.5) / netSize,
+      y2: (cy + h * 0.5) / netSize,
+      score: bestProb,
+      classId: bestCls,
+    })
+  }
+
+  // console.log(boxes.length)
+  /* NMS (IoU) ------------------------------------------------------------ */
+  boxes.sort((a, b) => b.score - a.score)
+  const picked: Detection[] = []
+
+  outer: for (let i = 0; i < boxes.length; i++) {
+    const a = boxes[i]
+    for (let j = 0; j < picked.length; j++) {
+      if (_iou(a, picked[j]) > nmsThr) continue outer
+    }
+    picked.push(a)
+  }
+  // console.log(picked.length)
+  return picked
+}
 function _iou(a: Detection, b: Detection): number {
   'worklet'
   const x1 = Math.max(a.x1, b.x1)
@@ -88,92 +175,4 @@ export function createYoloXNanoDetector(
       nmsThr,
     )
   }
-}
-
-/* ───────────────────── private helpers ──────────────────────── */
-
-const NUM_BBOX_FIELDS = 5
-const STRIDES = [8, 16, 32] as const
-
-function _postprocess(
-  tensor: Float32Array,
-  grid: readonly { cx: number; cy: number; s: number }[],
-  netSize: number,
-  numClasses: number,
-  confThr: number,
-  nmsThr: number,
-): Detection[] {
-  'worklet'
-
-  const stride = numClasses + NUM_BBOX_FIELDS
-  const anchors = grid.length
-  const boxes: Detection[] = []
-
-  for (let a = 0; a < anchors; a++) {
-    const g = grid[a]
-    const off = a * stride
-
-    const cx = (tensor[off + 0] + g.cx) * g.s
-    const cy = (tensor[off + 1] + g.cy) * g.s
-    const w  = Math.exp(tensor[off + 2]) * g.s
-    const h  = Math.exp(tensor[off + 3]) * g.s
-
-    const obj = tensor[off + 4]
-
-    let bestProb = 0
-    let bestCls  = 0
-    for (let c = 0; c < numClasses; c++) {
-      const p = tensor[off + NUM_BBOX_FIELDS + c] * obj
-      if (p > bestProb) { bestProb = p; bestCls = c }
-    }
-    if (bestProb < confThr) continue
-
-    boxes.push({
-      x1: (cx - w * 0.5) / netSize,
-      y1: (cy - h * 0.5) / netSize,
-      x2: (cx + w * 0.5) / netSize,
-      y2: (cy + h * 0.5) / netSize,
-      score: bestProb,
-      classId: bestCls,
-    })
-  }
-
-  // console.log(boxes.length)
-  /* NMS (IoU) ------------------------------------------------------------ */
-  boxes.sort((a, b) => b.score - a.score)
-  const picked: Detection[] = []
-
-  outer: for (let i = 0; i < boxes.length; i++) {
-    const a = boxes[i]
-    for (let j = 0; j < picked.length; j++) {
-      if (_iou(a, picked[j]) > nmsThr) continue outer
-    }
-    picked.push(a)
-  }
-  // console.log(picked.length)
-  return picked
-}
-
-/* grid cache (per net-size) */
-const _gridCache: Record<number, Array<{ cx: number; cy: number; s: number }>> =
-  {}
-
-function _getGrid(w: number, h: number) {
-  'worklet'
-  const key = w * 10000 + h
-  if (!_gridCache[key]) {
-    const cells: { cx: number; cy: number; s: number }[] = []
-    for (let sIdx = 0; sIdx < STRIDES.length; sIdx++) {
-      const s = STRIDES[sIdx]
-      const gw = w / s
-      const gh = h / s
-      for (let y = 0; y < gh; y++) {
-        for (let x = 0; x < gw; x++) {
-          cells.push({ cx: x, cy: y, s })
-        }
-      }
-    }
-    _gridCache[key] = cells
-  }
-  return _gridCache[key]!
 }

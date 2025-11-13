@@ -1,6 +1,6 @@
 import React, { useCallback, useRef } from 'react'
 import type { ViewProps } from 'react-native'
-import { Dimensions, StyleSheet, View } from 'react-native'
+import { StyleSheet, View } from 'react-native'
 import type { TapGestureHandlerStateChangeEvent } from 'react-native-gesture-handler'
 import { PanGestureHandler, State, TapGestureHandler } from 'react-native-gesture-handler'
 import Reanimated, {
@@ -16,8 +16,6 @@ import Reanimated, {
 import type { Camera, PhotoFile, VideoFile } from 'react-native-vision-camera'
 
 // Constants
-const SCREEN_WIDTH = Dimensions.get('window').width
-const SCREEN_HEIGHT = Dimensions.get('window').height
 const CAPTURE_BUTTON_SIZE = 78
 const START_RECORDING_DELAY = 200
 const BORDER_WIDTH = CAPTURE_BUTTON_SIZE * 0.1

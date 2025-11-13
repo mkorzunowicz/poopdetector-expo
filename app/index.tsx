@@ -31,7 +31,7 @@ const WelcomeScreen: React.FC = () => {
 
         // Add a timeout to prevent spinner from being stuck forever
         const timeout = setTimeout(() => {
-          setError(tr("OnboardingScreen.errorInitLogin"));
+          setError(tr("OnboardingScreen.errorInit"));
           setLoading(false);
         }, 5000); // 5 seconds timeout
 

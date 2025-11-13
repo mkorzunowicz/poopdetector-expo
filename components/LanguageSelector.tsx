@@ -1,16 +1,16 @@
+import { tr } from '@/i18n/i18n';
+import { LanguageCode, useLanguage } from '@/providers/LanguageProvider';
+import { useTheme } from '@/styles/ThemeContext';
+import { Ionicons } from '@expo/vector-icons';
 import React, { useState } from 'react';
 import {
-  View,
-  Text,
-  TouchableOpacity,
+  FlatList,
   Modal,
   StyleSheet,
-  FlatList,
+  Text,
+  TouchableOpacity,
+  View,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { useTheme } from '@/styles/ThemeContext';
-import { useLanguage, LanguageCode } from '@/providers/LanguageProvider';
-import { tr } from '@/i18n/i18n';
 
 interface LanguageSelectorProps {
   style?: any;
@@ -30,8 +30,6 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({ style }) => 
         return tr('Language.english');
       case 'pl':
         return tr('Language.polish');
-      case 'de':
-        return tr('Language.german');
       default:
         return tr('Language.auto');
     }

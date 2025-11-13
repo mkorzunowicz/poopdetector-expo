@@ -23,7 +23,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     android: {
         softwareKeyboardLayoutMode: 'pan',
         adaptiveIcon: {
-        foregroundImage: './assets/images/detector-icon.png',
+        foregroundImage: './assets/images/icon.png',
         backgroundColor: '#ffffff',
         },
         package: 'com.ugs.poopdetector',
@@ -60,10 +60,10 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
         [
         'expo-splash-screen',
         {
-            image: './assets/images/detector-icon.png',
+            image: './assets/images/detector-splash.png',
             imageWidth: 200,
             resizeMode: 'contain',
-            backgroundColor: '#ffffff',
+            backgroundColor: '#000',
         },
         ],
         ['expo-build-properties'],

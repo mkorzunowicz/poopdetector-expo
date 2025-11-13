@@ -44,7 +44,7 @@ export function createYoloXMediumDetector(
   const size = 640
   const numAnchors = 8400    // 640 model fixed
 
-  return (frame): Detection[] => {
+  return (frame: any): Detection[] => {
     'worklet'
 
     /* 1) rotate + resize to preview orientation -------------------- */
