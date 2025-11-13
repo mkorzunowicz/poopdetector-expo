@@ -219,19 +219,30 @@ const CameraPage: React.FC = () => {
     [],
   )
 
-  const [selected, setSelected] = useState<DetectorName>('efficientdet')
+  const [selected, setSelected] = useState<DetectorName>('poop-yolox-nano')
+  // const [selected, setSelected] = useState<DetectorName>('yolov8')
+  // const [selected, setSelected] = useState<DetectorName>('yolox-tiny')
   const { detect, meta, ready } = useDetector(selected, resize)
+  
+  // console.log(`[App] Current detector: ${selected}, ready: ${ready}, detect function exists: ${!!detect}`)
 
   //#region FrameProcessor
 
   const frameProcessor = useFrameProcessor((frame) => {
     'worklet'
-    if (!detect || !ready) return
+    // console.log(`[FrameProcessor] Called with frame: ${frame.width}x${frame.height}, pixelFormat: ${frame.pixelFormat}, orientation: ${frame.orientation}, detect: ${!!detect}, ready: ${ready}`)
+    
+    if (!detect || !ready) {
+      // console.log(`[FrameProcessor] Skipping - detect: ${!!detect}, ready: ${ready}`)
+      return
+    }
 
-    runAtTargetFps(5, () => {
+    runAtTargetFps(1, () => {
+      // console.log(`[FrameProcessor] Running detection at targetFps 2`)
       const t0 = Date.now()
       const dets = detect(frame, device?.position == 'front')
-      // console.log(`[FP] total: ${Date.now() - t0} ms`)
+      const totalTime = Date.now() - t0
+      console.log(`[FrameProcessor] Detection completed in ${totalTime}ms, found ${dets.length} objects`)
       updateDetectionsJS(dets)
     })
   }, [detect, device])
@@ -240,14 +251,9 @@ const CameraPage: React.FC = () => {
 
   const videoHdr = format?.supportsVideoHdr && enableHdr
   const photoHdr = format?.supportsPhotoHdr && enableHdr && !videoHdr
-  // Rotation at which *this* preview is shown
-  const o: number = 270      // or use frame.orientation you saved
-
-  // Swap if portrait
-  const vW = (o === 90 || o === 270) ? format?.videoHeight ?? 0
-    : format?.videoWidth ?? 0
-  const vH = (o === 90 || o === 270) ? format?.videoWidth ?? 0
-    : format?.videoHeight ?? 0
+  // Use actual format dimensions without swapping
+  const vW = format?.videoWidth ?? 0
+  const vH = format?.videoHeight ?? 0
   // Show permissions screen if permissions are not granted
   if (!cameraPermission.hasPermission || !microphone.hasPermission) {
     return (
@@ -296,7 +302,6 @@ const CameraPage: React.FC = () => {
                   animatedProps={cameraAnimatedProps}
                   exposure={0}
                   enableFpsGraph={true}
-                  outputOrientation="device"
                   photo={true}
                   video={true}
                   audio={microphone.hasPermission}
@@ -311,8 +316,6 @@ const CameraPage: React.FC = () => {
             detections={detections}
             viewWidth={previewSize.w}
             viewHeight={previewSize.h}
-            videoWidth={vW}
-            videoHeight={vH}
             mirrored={cameraPosition === 'front'}
           />
         </>

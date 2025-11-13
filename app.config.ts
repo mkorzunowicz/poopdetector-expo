@@ -6,7 +6,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     slug: 'poop-detector',
     version: '1.0.0',
     orientation: 'portrait',
-    icon: './assets/images/icon.png',
+    icon: './assets/images/icon2.png',
     scheme: 'poop-detector',
     userInterfaceStyle: 'automatic',
     owner: 'ugs',
@@ -58,12 +58,18 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
         },
         ],
         [
-        'expo-splash-screen',
+        "expo-splash-screen",
         {
-            image: './assets/images/detector-splash.png',
-            imageWidth: 200,
-            resizeMode: 'contain',
-            backgroundColor: '#000',
+          "ios": {
+            "backgroundColor": "#000",
+            "image": "./assets/images/splash-icon.png",
+            "resizeMode": "cover"
+          },
+          "android": {
+            "backgroundColor": "#000",
+            "image": "./assets/images/detector-splash.png",
+            "imageWidth": 400
+          }
         },
         ],
         ['expo-build-properties'],

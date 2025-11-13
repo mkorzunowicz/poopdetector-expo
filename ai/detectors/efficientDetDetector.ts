@@ -2,7 +2,7 @@
 
 import { TensorflowModel } from "react-native-fast-tflite";
 import { Frame } from "react-native-vision-camera";
-import { COCO_LABELS } from "../cocoLabels";
+import { EFFICIENTDET_COLORS_ARRAY, EFFICIENTDET_LABELS_ARRAY } from "../efficientDetLabels";
 import { toDegrees } from "../orientationMapping";
 import { Detection, modelToString } from "./types";
 
@@ -141,8 +141,8 @@ export function createEfficientDetDetector(
         }
         const detsWithStyle = keep.map(d => ({
             ...d,
-            label: COCO_LABELS[d.classId],
-            // color: COCO_COLORS[d.classId],
+            label: EFFICIENTDET_LABELS_ARRAY[d.classId] || `class_${d.classId}`,
+            color: EFFICIENTDET_COLORS_ARRAY[d.classId] || '#FFFFFF',
         }))
         return detsWithStyle
     }

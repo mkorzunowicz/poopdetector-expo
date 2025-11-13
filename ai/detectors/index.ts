@@ -14,7 +14,7 @@ export const DETECTOR_NAMES = [
 ] as const
 export type DetectorName = (typeof DETECTOR_NAMES)[number]
 
-export function useDetector(name: DetectorName, resizeFn: any): UseDetectorResult {
+export function useDetector(name: DetectorName, resizeFn: Function): UseDetectorResult {
     switch (name) {
         case 'yolox-tiny': return useDetectorYoloNano(resizeFn)
         case 'efficientdet': return useDetectorEffDet(resizeFn)

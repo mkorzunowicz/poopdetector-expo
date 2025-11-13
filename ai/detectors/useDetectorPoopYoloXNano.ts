@@ -7,11 +7,13 @@ import { createYoloXNanoDetector } from './yoloxNanoDetector'
 export function useDetectorYoloXNanoPoop(resizeFn: any): UseDetectorResult {
   const modelHook = useTensorflowModel(
     require('../../assets/yolox_nano_poop_cropped_only_best_float32.tflite'),
-    'android-gpu'
+    // 'android-gpu'
   )
 
   const detect = useMemo(() => {
+    console.log(`[PoopDetector] Model state: ${modelHook.state}`)
     if (modelHook.state !== 'loaded') return null
+    console.log(`[PoopDetector] Creating poop detector - 1 class, 416x416 input`)
     return createYoloXNanoDetector(modelHook.model, resizeFn, {
       size: 416, confThr: 0.4, numClasses: 1
     })
