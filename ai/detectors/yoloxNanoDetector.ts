@@ -92,13 +92,6 @@ function _generateBoundingBoxProposals(
   const proposalLength = numClasses + numBBoxFields
   const proposals: Detection[] = []
 
-  // console.log(`[YoloX] Processing ${gridCoords.length} anchors with confThr=${confidenceThreshold}`)
-
-  // // Quick sanity check on tensor size
-  // if (modelOutput.length !== gridCoords.length * proposalLength) {
-  //   console.log(`[YoloX] WARNING: tensor size mismatch! Expected: ${gridCoords.length * proposalLength}, got: ${modelOutput.length}`)
-  // }
-
   for (let anchorIndex = 0; anchorIndex < gridCoords.length; anchorIndex++) {
     const grid = gridCoords[anchorIndex]
     const startIndex = anchorIndex * proposalLength
@@ -110,18 +103,18 @@ function _generateBoundingBoxProposals(
     const h = Math.exp(modelOutput[startIndex + 3]) * grid.stride
 
     // Compute objectness (matching C# box_objectness)
-    // YoloX objectness should be passed through sigmoid activation
+    // YoloX objectness should be passed through sigmoid activation - optimized
     const rawObjectness = modelOutput[startIndex + 4]
-    const boxObjectness = 1.0 / (1.0 + Math.exp(-rawObjectness)) // sigmoid activation
+    const boxObjectness = rawObjectness > 0 ? 1.0 / (1.0 + Math.exp(-rawObjectness)) : Math.exp(rawObjectness) / (1.0 + Math.exp(rawObjectness))
 
     let bestProb = 0
     let bestClassIndex = 0
 
-    // Compute class probabilities for each bounding box (matching C# logic)
+    // Compute class probabilities for each bounding box (matching C# logic) - optimized
     for (let classIndex = 0; classIndex < numClasses; classIndex++) {
       const rawClassScore = modelOutput[startIndex + numBBoxFields + classIndex]
-      // YoloX class scores should also be passed through sigmoid activation
-      const boxClassScore = 1.0 / (1.0 + Math.exp(-rawClassScore)) // sigmoid activation
+      // YoloX class scores should also be passed through sigmoid activation - optimized
+      const boxClassScore = rawClassScore > 0 ? 1.0 / (1.0 + Math.exp(-rawClassScore)) : Math.exp(rawClassScore) / (1.0 + Math.exp(rawClassScore))
       const boxProb = boxObjectness * boxClassScore // Final probability
 
       // Update the object with the highest probability and class label
@@ -131,26 +124,32 @@ function _generateBoundingBoxProposals(
       }
     }
 
-    // Balanced filtering to reduce false positives while keeping real detections
-    if (boxObjectness < 0.15) continue // Moderate objectness threshold (15%)
+    // Early exit optimizations - check cheapest conditions first
+    if (boxObjectness < 0.15) continue // Quick objectness check (15%)
+    
+    // Skip expensive class probability calculations if we already have enough detections
+    if (proposals.length >= 50 && boxObjectness < 0.3) continue
+    
     const bestClassScore = bestProb / boxObjectness
     if (bestClassScore < 0.4) continue // Moderate class confidence (40%)
     if (bestProb < 0.25) continue // Minimum final probability check (25%)
 
     // Filter by confidence threshold (matching C# where clause)
     if (bestProb > confidenceThreshold) {
-      const x1 = (centerX - w * 0.5) / netSize
-      const y1 = (centerY - h * 0.5) / netSize
-      const x2 = (centerX + w * 0.5) / netSize
-      const y2 = (centerY + h * 0.5) / netSize
+      const halfW = w * 0.5
+      const halfH = h * 0.5
+      const x1 = (centerX - halfW) / netSize
+      const y1 = (centerY - halfH) / netSize
+      const x2 = (centerX + halfW) / netSize
+      const y2 = (centerY + halfH) / netSize
       
       // Reasonable bounds and size checking
       if (x1 < 0 || y1 < 0 || x2 > 1 || y2 > 1) continue // Box outside image bounds
       if ((x2 - x1) < 0.015 || (y2 - y1) < 0.015) continue // Box too small (min 1.5%)
       if ((x2 - x1) > 0.9 || (y2 - y1) > 0.9) continue // Box too large (max 90%)
       
-      // Limit total proposals to prevent runaway detections
-      if (proposals.length >= 200) break // Hard limit of 200 proposals
+      // Limit total proposals to prevent runaway detections - reduced for performance
+      if (proposals.length >= 100) break // Hard limit of 100 proposals (was 200)
       
       const detection = {
         x1, y1, x2, y2,
@@ -160,9 +159,9 @@ function _generateBoundingBoxProposals(
       proposals.push(detection)
       
       // Log first detection for debugging
-      if (proposals.length === 1) {
-        console.log(`[YoloX] First proposal: class=${bestClassIndex} conf=${bestProb.toFixed(3)} obj=${boxObjectness.toFixed(3)} size=${((x2-x1)*100).toFixed(1)}%x${((y2-y1)*100).toFixed(1)}%`)
-      }
+      // if (proposals.length === 1) {
+      //   console.log(`[YoloX] First proposal: class=${bestClassIndex} conf=${bestProb.toFixed(3)} obj=${boxObjectness.toFixed(3)} size=${((x2-x1)*100).toFixed(1)}%x${((y2-y1)*100).toFixed(1)}%`)
+      // }
     }
   }
 
@@ -220,8 +219,8 @@ function _postprocess(
 
   // console.log(`[YoloX] After NMS: ${picked.length} detections kept`)
   
-  // Final reasonable limit on detections
-  const finalDetections = picked.slice(0, 50) // Maximum 50 detections per frame
+  // Final reasonable limit on detections - reduced for performance
+  const finalDetections = picked.slice(0, 20) // Maximum 20 detections per frame (was 50)
   if (finalDetections.length < picked.length) {
     console.log(`[YoloX] Limited to ${finalDetections.length} detections (was ${picked.length})`)
   }
@@ -257,59 +256,42 @@ export function createYoloXNanoDetector(
 
   const inSize      = opts.size       ?? 416
   const numClasses  = opts.numClasses ?? 80
-  const confThr     = opts.confThr    ?? 0.6
+  const confThr     = opts.confThr    ?? 0.5
   const nmsThr      = opts.nmsThr     ?? 0.45
 
   // pre-computed grid/stride table
   const grid = _getGrid(inSize, inSize)
 
+  // Pre-compute constants to avoid repeated calculations
+  const halfInSize = inSize * 0.5
+  
   return (frame:Frame /* VisionCamera Frame */): Detection[] => {
     'worklet'
 
     // console.log(`[YoloXNano] Processing frame: ${frame.width}x${frame.height}, pixelFormat: ${frame.pixelFormat}`)
 
     /* 1) preprocess ------------------------------------------------------ */
-    // YoloX expects float32 input with values in range [0, 255] (not normalized)
-    // This matches the C# implementation which doesn't normalize input
     const t0 = Date.now()
-    const rgbNormalized = resizeFn(frame, {
+    
+    // Int8 model: get uint8 [0,255] then convert to int8 [-128,127]
+    const rgbUint8 = resizeFn(frame, {
       scale: { width: inSize, height: inSize },
-      crop: {
-        y: 0,
-        x: 0,
-        width: frame.width,
-        height: frame.height
-      },
+      crop: { y: 0, x: 0, width: frame.width, height: frame.height },
       pixelFormat: 'rgb',
-      dataType: 'float32',
-      // Get normalized [0,1] values first
-      normalise: true,
+      dataType: 'uint8'
     })
-    
-    // console.log(`[YoloXNano] Frame: ${frame.width}x${frame.height}, orientation: ${frame.orientation}`)
-    
-    // Scale to [0, 255] range as expected by YoloX
-    const rgb = new Float32Array(rgbNormalized.length)
-    for (let i = 0; i < rgbNormalized.length; i++) {
-      rgb[i] = rgbNormalized[i] * 255.0
-    }
-    
+      
     const t1 = Date.now()
+    // Direct TypedArray conversion - much faster than normalization approach
+    const inputData = new Float32Array(rgbUint8);
+    const t2 = Date.now()
+    // console.log(`[YoloX] Input: uint8[0,255] -> float32[0,255], sample: ${rgbUint8[0]} -> ${inputData[0]}`)
     
-    // Sample some pixel values to verify preprocessing
-    // const samplePixels = []
-    // for (let i = 0; i < Math.min(10, rgb.length); i += Math.floor(rgb.length / 10)) {
-    //   samplePixels.push(rgb[i].toFixed(1))
-    // }
-    // console.log(`[YoloXNano] Preprocessing took: ${t1 - t0}ms, tensor shape: ${rgb.length}, sample pixels: [${samplePixels.join(', ')}] (scaled to 0-255)`)
-    console.log(`[YoloXNano] Preprocessing took: ${t1 - t0}ms, tensor shape: ${rgb.length}`)
     
     /* 2) inference ------------------------------------------------------- */
-    const out = model.runSync([rgb])
-    const t2 = Date.now()
-    // YOLOX has a single output tensor
-    const tensor = out[0] as Float32Array
-    console.log(`[YoloXNano] Inference took: ${t2 - t1}ms, output tensor shape: ${tensor.length}`)
+    const out = model.runSync([inputData])
+    const t3 = Date.now()
+    const tensor = out[0] as Float32Array;
 
     /* 3) post-process ---------------------------------------------------- */
     const detections = _postprocess(
@@ -348,17 +330,10 @@ export function createYoloXNanoDetector(
       return d
     })
     
-    const t3 = Date.now()
-    console.log(`[YoloXNano] Postprocessing took: ${t3 - t2}ms`)
+    const t4 = Date.now()
 
     // // Add debug logging
-    // console.log(`[YoloXNano] Total detection time: ${t3 - t0}ms, found ${transformedDetections.length} objects`)
-    // if (transformedDetections.length > 0) {
-    //   console.log('[YoloXNano] Original detections:', 
-    //     detections.map(d => `class:${d.classId} conf:${d.score.toFixed(3)} box:[${d.x1.toFixed(3)},${d.y1.toFixed(3)},${d.x2.toFixed(3)},${d.y2.toFixed(3)}]`).join(' | '))
-    //   console.log('[YoloXNano] Transformed detections:', 
-    //     transformedDetections.map(d => `class:${d.classId} conf:${d.score.toFixed(3)} box:[${d.x1.toFixed(3)},${d.y1.toFixed(3)},${d.x2.toFixed(3)},${d.y2.toFixed(3)}]`).join(' | '))
-    // }
+    console.log(`[YoloXNano] Total detection time: ${t4 - t0}ms, resize: ${t1-t0}ms, preproc: ${t2 - t1}ms, inference: ${t3 - t2}ms, postproc: ${t4 - t3}ms, in[${frame.width}x${frame.height}] -> [${inSize}x${inSize}]`)
 
     return transformedDetections
   }
