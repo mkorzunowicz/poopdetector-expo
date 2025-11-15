@@ -1,0 +1,15 @@
+diff --git a/android/src/main/cpp/ResizePlugin.cpp b/android/src/main/cpp/ResizePlugin.cpp
+index 1111111..2222222 100644
+--- a/android/src/main/cpp/ResizePlugin.cpp
++++ b/android/src/main/cpp/ResizePlugin.cpp
+@@ -393,7 +393,9 @@ FrameBuffer ResizePlugin::convertBufferToDataType(const FrameBuffer& frameBuffe
+       return frameBuffer;
+     case FLOAT32: {
+       float* floatData = reinterpret_cast<float*>(destination.data());
+-      status = libyuv::ByteToFloat(frameBuffer.data(), floatData, 1.0f / 255.0f, size);
++      // Use 1.0f scale to keep values in [0-255] range (unnormalized)
++      // Change to 1.0f / 255.0f if normalized [0-1] values are needed
++      status = libyuv::ByteToFloat(frameBuffer.data(), floatData, 1.0f, size);
+       break;
+     }
+   }

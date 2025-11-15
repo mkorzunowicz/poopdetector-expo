@@ -78,6 +78,18 @@ function _getGrid(w: number, h: number): GridCoordinate[] {
   return _gridCache[key]!
 }
 
+// Convert grid to flat format for native module [x, y, stride, x, y, stride, ...]
+function _gridToFlat(grid: GridCoordinate[]): Float32Array {
+  'worklet'
+  const flat = new Float32Array(grid.length * 3)
+  for (let i = 0; i < grid.length; i++) {
+    flat[i * 3] = grid[i].x
+    flat[i * 3 + 1] = grid[i].y
+    flat[i * 3 + 2] = grid[i].stride
+  }
+  return flat
+}
+
 // Generate bounding box proposals (matches C# GenerateBoundingBoxProposals)
 function _generateBoundingBoxProposals(
   modelOutput: Float32Array,
@@ -273,35 +285,46 @@ export function createYoloXNanoDetector(
     /* 1) preprocess ------------------------------------------------------ */
     const t0 = Date.now()
     
-    // Int8 model: get uint8 [0,255] then convert to int8 [-128,127]
-    const rgbUint8 = resizeFn(frame, {
+    // Get Float32Array [0-255] directly from native resize plugin (patched)
+    const inputData = resizeFn(frame, {
       scale: { width: inSize, height: inSize },
       crop: { y: 0, x: 0, width: frame.width, height: frame.height },
       pixelFormat: 'rgb',
-      dataType: 'uint8'
-    })
+      dataType: 'float32' // Returns Float32Array directly, no JS conversion needed
+    }) as Float32Array
       
-    const t1 = Date.now()
-    // Direct TypedArray conversion - much faster than normalization approach
-    const inputData = new Float32Array(rgbUint8);
     const t2 = Date.now()
-    // console.log(`[YoloX] Input: uint8[0,255] -> float32[0,255], sample: ${rgbUint8[0]} -> ${inputData[0]}`)
+    // console.log(`[YoloX] Input: float32[0,255] from native, sample: ${inputData[0]}`)
     
     
-    /* 2) inference ------------------------------------------------------- */
-    const out = model.runSync([inputData])
+    /* 2) inference + postprocessing -------------------------------------- */
+    // Try native postprocessing via modified TFLite plugin
+    let detections: Detection[];
+    try {
+      // Convert grid to flat format for native processing
+      const gridFlat = _gridToFlat(grid);
+      
+      // Run inference with native YoloX postprocessing
+      const out = model.runSync([inputData], {
+        yoloxPostprocess: true,
+        gridData: gridFlat,
+        numClasses,
+        netSize: inSize,
+        confThreshold: confThr,
+        nmsThreshold: nmsThr,
+        skipNMS: false
+      }) as Detection[];
+      
+      detections = out;
+      console.log('[YoloX] Native postprocessing succeeded');
+    } catch (error) {
+      console.log('[YoloX] Native postprocessing failed, using JS fallback:', error);
+      // Fallback to JS postprocessing
+      const out = model.runSync([inputData])
+      const tensor = out[0] as Float32Array;
+      detections = _postprocess(tensor, grid, inSize, numClasses, confThr, nmsThr);
+    }
     const t3 = Date.now()
-    const tensor = out[0] as Float32Array;
-
-    /* 3) post-process ---------------------------------------------------- */
-    const detections = _postprocess(
-      tensor,
-      grid,
-      inSize,
-      numClasses,
-      confThr,
-      nmsThr,
-    )
     
     // Transform coordinates based on frame orientation
     const transformedDetections = detections.map(d => {
@@ -333,7 +356,7 @@ export function createYoloXNanoDetector(
     const t4 = Date.now()
 
     // // Add debug logging
-    console.log(`[YoloXNano] Total detection time: ${t4 - t0}ms, resize: ${t1-t0}ms, preproc: ${t2 - t1}ms, inference: ${t3 - t2}ms, postproc: ${t4 - t3}ms, in[${frame.width}x${frame.height}] -> [${inSize}x${inSize}]`)
+    console.log(`[YoloXNano] Total detection time: ${t4 - t0}ms, resize: ${t2-t0}ms, inference: ${t3 - t2}ms, postproc: ${t4 - t3}ms, in[${frame.width}x${frame.height}] -> [${inSize}x${inSize}]`)
 
     return transformedDetections
   }
