@@ -48,6 +48,7 @@ Reanimated.addWhitelistedNativeProps({
 const CameraPage: React.FC = () => {
   const camera = useRef<Camera>(null)
   const [isCameraInitialized, setIsCameraInitialized] = useState(false)
+  const [cameraError, setCameraError] = useState<string | null>(null)
   const cameraPermission = useCameraPermission()
   const microphone = useMicrophonePermission()
   const location = useLocationPermission()
@@ -70,6 +71,26 @@ const CameraPage: React.FC = () => {
       }
     }, [])
   )
+
+  // Clear detections when camera becomes inactive
+  useEffect(() => {
+    if (!isActive) {
+      console.log('[Camera] Camera inactive - clearing detections and pausing processing')
+      setDetections([])
+    } else {
+      console.log('[Camera] Camera active - resuming processing')
+    }
+  }, [isActive])
+
+  // Reset camera error state when app comes back to foreground
+  useEffect(() => {
+    if (isActive && cameraError) {
+      console.log('[Camera] App became active with previous error, attempting recovery...')
+      // Reset error state to trigger camera reinitialization
+      setCameraError(null)
+      setIsCameraInitialized(false)
+    }
+  }, [isActive, cameraError])
 
   // Check permissions and redirect if needed
   useEffect(() => {
@@ -131,11 +152,19 @@ const CameraPage: React.FC = () => {
     [isPressingButton],
   )
   const onError = useCallback((error: CameraRuntimeError) => {
-    console.error(error)
+    console.error('[Camera] Error:', error.code, error.message)
+    setCameraError(error.code)
+    
+    // Reset initialization state on error
+    if (error.code === 'system/camera-is-restricted' || 
+        error.code === 'session/camera-not-ready') {
+      setIsCameraInitialized(false)
+    }
   }, [])
   const onInitialized = useCallback(() => {
     console.log('Camera initialized!')
     setIsCameraInitialized(true)
+    setCameraError(null) // Clear any previous errors
   }, [])
   const onMediaCaptured = useCallback(
     (media: PhotoFile | VideoFile, type: 'photo' | 'video') => {
@@ -230,7 +259,8 @@ const CameraPage: React.FC = () => {
   const frameProcessor = useFrameProcessor((frame) => {
     'worklet'
     
-    if (!detect || !ready) {
+    // Don't process frames if camera is not active (app in background or tab not focused)
+    if (!isActive || !detect || !ready) {
       return
     }
     var targetFps = Platform.OS === 'ios' ? 5 : 5;
@@ -242,7 +272,7 @@ const CameraPage: React.FC = () => {
       console.log(`[FrameProcessor] Detection completed in ${totalTime}ms, found ${dets.length} objects`)
       updateDetectionsJS(dets)
     })
-  }, [detect, device])
+  }, [isActive, detect, ready, device])
 
   //#endregion
 
@@ -321,6 +351,21 @@ const CameraPage: React.FC = () => {
               <View style={styles.modelLoaderCard}>
                 <ActivityIndicator size="large" color="#4A90E2" />
                 <Text style={styles.modelLoaderText}>{tr('Camera.loadingModel')}</Text>
+              </View>
+            </View>
+          )}
+
+          {cameraError && (
+            <View style={styles.errorOverlay}>
+              <View style={styles.errorCard}>
+                <Ionicons name="warning-outline" size={48} color="#E74C3C" />
+                <Text style={styles.errorTitle}>Camera Restricted</Text>
+                <Text style={styles.errorMessage}>
+                  Camera was restricted by the system. This happens when the app is in the background for too long.
+                </Text>
+                <Text style={styles.errorHint}>
+                  Switch back to the Camera tab to resume.
+                </Text>
               </View>
             </View>
           )}
@@ -434,6 +479,41 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: '#333',
+  },
+  errorOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0, 0, 0, 0.85)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 101,
+  },
+  errorCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    borderRadius: 16,
+    padding: 24,
+    alignItems: 'center',
+    maxWidth: 320,
+    margin: 20,
+  },
+  errorTitle: {
+    marginTop: 16,
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#E74C3C',
+    marginBottom: 12,
+  },
+  errorMessage: {
+    fontSize: 14,
+    color: '#333',
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 12,
+  },
+  errorHint: {
+    fontSize: 13,
+    color: '#666',
+    textAlign: 'center',
+    fontStyle: 'italic',
   },
 })
 
