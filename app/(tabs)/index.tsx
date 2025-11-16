@@ -1,4 +1,5 @@
 import { BoundingBoxOverlay } from '@/components/BoundingBoxOverlay'
+import { tr } from '@/i18n/i18n'
 import * as React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { GestureResponderEvent } from 'react-native'
@@ -19,7 +20,7 @@ import { Worklets } from 'react-native-worklets-core'
 import { DETECTOR_NAMES, DetectorName, useDetector } from '@/ai/detectors'
 import { Detection } from '@/ai/detectors/types'
 import { useFocusEffect } from '@react-navigation/core'
-import { Dimensions, Platform, StyleSheet, Text, TouchableOpacity, View } from "react-native"
+import { ActivityIndicator, Dimensions, Platform, StyleSheet, Text, TouchableOpacity, View } from "react-native"
 import { useResizePlugin } from 'vision-camera-resize-plugin'
 
 import { CaptureButton } from '@/components/buttons/CaptureButton'
@@ -53,16 +54,6 @@ const CameraPage: React.FC = () => {
   const zoom = useSharedValue(1)
   const isPressingButton = useSharedValue(false)
   const insets = useSafeAreaInsets()
-  // const model = useTensorflowModel(require('../assets/fastsam_s-qualcomm_snapdragon_8_elite.tflite'),'android-gpu')
-  // const model = useTensorflowModel({ url: 'https://github.com/mkorzunowicz/tflite_models/raw/refs/heads/main/efficientdet_f32.tflite'},'android-gpu')
-  
-
-  // const actualModel = model.state === 'loaded' ? model.model : undefined
-
-  // React.useEffect(() => {
-  //   if (actualModel == null) return
-  //   console.log(`Model loaded! Shape:\n${modelToString(actualModel)}]`)
-  // }, [actualModel])
 
   const { resize } = useResizePlugin()
 
@@ -220,26 +211,31 @@ const CameraPage: React.FC = () => {
   )
 
   const [selected, setSelected] = useState<DetectorName>('poop-yolox-nano')
-  // const [selected, setSelected] = useState<DetectorName>('yolov8')
-  // const [selected, setSelected] = useState<DetectorName>('yolox-tiny')
   const { detect, meta, ready } = useDetector(selected, resize)
   
-  // console.log(`[App] Current detector: ${selected}, ready: ${ready}, detect function exists: ${!!detect}`)
+  // Show loading indicator while model is initializing
+  const [showModelLoader, setShowModelLoader] = useState(true)
+  useEffect(() => {
+    if (ready) {
+      // Small delay to ensure smooth transition
+      const timer = setTimeout(() => setShowModelLoader(false), 300)
+      return () => clearTimeout(timer)
+    } else {
+      setShowModelLoader(true)
+    }
+  }, [ready])
 
   //#region FrameProcessor
 
   const frameProcessor = useFrameProcessor((frame) => {
     'worklet'
-    // console.log(`[FrameProcessor] Called with frame: ${frame.width}x${frame.height}, pixelFormat: ${frame.pixelFormat}, orientation: ${frame.orientation}, detect: ${!!detect}, ready: ${ready}`)
     
     if (!detect || !ready) {
-      // console.log(`[FrameProcessor] Skipping - detect: ${!!detect}, ready: ${ready}`)
       return
     }
-    var targetFps = Platform.OS === 'ios' ? 5 : 1;
+    var targetFps = Platform.OS === 'ios' ? 5 : 5;
 
     runAtTargetFps(targetFps, () => {
-      // console.log(`[FrameProcessor] Running detection at targetFps ${targetFps}`)
       const t0 = Date.now()
       const dets = detect(frame, device?.position == 'front')
       const totalTime = Date.now() - t0
@@ -259,9 +255,9 @@ const CameraPage: React.FC = () => {
   if (!cameraPermission.hasPermission || !microphone.hasPermission) {
     return (
       <View style={styles.emptyContainer}>
-        <Text style={styles.text}>Camera and microphone permissions are required.</Text>
+        <Text style={styles.text}>{tr('Camera.permissionsRequired')}</Text>
         <TouchableOpacity style={styles.button} onPress={() => router.push('/permissions')}>
-          <Text style={styles.text}>Grant Permissions</Text>
+          <Text style={styles.text}>{tr('Permissions.grantPermissions')}</Text>
         </TouchableOpacity>
       </View>
     )
@@ -319,10 +315,19 @@ const CameraPage: React.FC = () => {
             viewHeight={previewSize.h}
             mirrored={cameraPosition === 'front'}
           />
+
+          {showModelLoader && (
+            <View style={styles.modelLoaderOverlay}>
+              <View style={styles.modelLoaderCard}>
+                <ActivityIndicator size="large" color="#4A90E2" />
+                <Text style={styles.modelLoaderText}>{tr('Camera.loadingModel')}</Text>
+              </View>
+            </View>
+          )}
         </>
       ) : (
         <View style={styles.emptyContainer}>
-          <Text style={styles.text}>Your phone does not have a Camera.</Text>
+          <Text style={styles.text}>{tr('Camera.noCameraAvailable')}</Text>
         </View>
       )}
 
@@ -409,6 +414,26 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  modelLoaderOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 100,
+  },
+  modelLoaderCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    borderRadius: 16,
+    padding: 24,
+    alignItems: 'center',
+    minWidth: 200,
+  },
+  modelLoaderText: {
+    marginTop: 16,
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#333',
   },
 })
 

@@ -1,6 +1,7 @@
 import OnboardingCarousel from "@/components/OnboardingCarousel";
 import { tr } from "@/i18n/i18n";
 import { useTheme } from "@/styles/ThemeContext";
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from "expo-router";
 import React, { useEffect, useState } from "react";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
@@ -17,6 +18,13 @@ const WelcomeScreen: React.FC = () => {
   const [showOnboarding, setShowOnboarding] = useState(false);
 
   const handleOnboardingComplete = () => {
+    // persist that onboarding has been completed so we can skip it next launch
+    try {
+      AsyncStorage.setItem('@onboardingCompleted', 'true');
+    } catch (err) {
+      console.warn('Failed to persist onboarding completion', err);
+    }
+
     router.replace("/(tabs)");
   };
 
@@ -30,14 +38,17 @@ const WelcomeScreen: React.FC = () => {
       try {
 
         // Add a timeout to prevent spinner from being stuck forever
-        const timeout = setTimeout(() => {
-          setError(tr("OnboardingScreen.errorInit"));
-          setLoading(false);
-        }, 5000); // 5 seconds timeout
+        // Check if the user already completed onboarding
+        const completed = await AsyncStorage.getItem('@onboardingCompleted');
 
-        clearTimeout(timeout); // Clear the timeout if operation completes in time
+        if (completed === 'true') {
+          // already completed, navigate straight to main tabs
+          router.replace('/(tabs)');
+          return;
+        }
 
-        setShowOnboarding(true); // Show onboarding for new users
+        // Not completed yet — show onboarding
+        setShowOnboarding(true);
         setLoading(false);
       } catch (err) {
         setError(tr("OnboardingScreen.errorInit"));

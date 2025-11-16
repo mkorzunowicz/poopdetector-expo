@@ -1,28 +1,48 @@
 const lightTheme = {
     name: "light",
     colors: {
-        primary: "#043F32",
-        secondary: "#042628",
-        textPrimary: "#0A2533",
-        textSecondary: "#97A2B0",
-        textTertiary: "#fff",
-        textQuaternary: "#888",
-        textQuinary: "#0A2533",
-        backgroundPrimary: "#fff",
-        backgroundSecondary: "#fff",
-        backgroundTertiary: "#f7f7f7",
-        backgroundQuaternary: "#fff",
-        backgroundQuinary: "#e6ebf2",
-        borderPrimary: "#e6ebf2",
-        borderSecondary: "#e6ebf2",
-        border: "#e6ebf2",
-        white: "#fff",
-        black: "#000",
-        gray: "#999",
-        error: "#FF4D4F",
-        success: "#52C41A",
-        warning: "#FAAD14",
-        inputBackground: "#E8F4F8",
+        // Primary colors from splash screen - adjusted for light theme
+        primary: "#4ECBA0", // Slightly darker mint for better contrast
+        secondary: "#5BC0E8", // Adjusted blue for light backgrounds
+        accent: "#B8865A", // Darker brown for visibility
+        
+        // Text colors - dark for contrast on light
+        text: "#0A1628",
+        textPrimary: "#0A1628",
+        textSecondary: "#5A6677",
+        textTertiary: "#7A8899",
+        textQuaternary: "#A8B5C7",
+        textQuinary: "#0A1628",
+        
+        // Background colors - clean whites with subtle tints
+        background: "#FFFFFF",
+        backgroundPrimary: "#FFFFFF",
+        backgroundSecondary: "#F8FAFB",
+        backgroundTertiary: "#F0F4F7",
+        backgroundQuaternary: "#F8FAFB",
+        backgroundQuinary: "#E8F0F3",
+        
+        // Borders - subtle with slight mint tint
+        border: "#E0E7ED",
+        borderPrimary: "#E0E7ED",
+        borderSecondary: "#D1DBE3",
+        
+        // Standard colors
+        white: "#FFFFFF",
+        black: "#000000",
+        gray: "#8B95A1",
+        
+        // Status colors - vibrant but accessible
+        error: "#E74C3C",
+        success: "#4ECBA0",
+        warning: "#F39C12",
+        info: "#5BC0E8",
+        
+        // Input styling
+        inputBackground: "#F0F4F7",
+        inputBorder: "#D1DBE3",
+        inputText: "#0A1628",
+        inputPlaceholder: "#A8B5C7",
     },
     fonts: {
         regular: "Poppins_400Regular",

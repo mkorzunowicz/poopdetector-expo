@@ -316,7 +316,7 @@ export function createYoloXNanoDetector(
       }) as Detection[];
       
       detections = out;
-      console.log('[YoloX] Native postprocessing succeeded');
+      // console.log('[YoloX] Native postprocessing succeeded');
     } catch (error) {
       console.log('[YoloX] Native postprocessing failed, using JS fallback:', error);
       // Fallback to JS postprocessing

@@ -2,11 +2,11 @@ import { UseDetectorResult } from './types'
 import { useDetectorYoloXNanoPoop } from './useDetectorPoopYoloXNano'
 
 export const DETECTOR_NAMES = [
-    'efficientdet',
-    'yolox-tiny',
-    'yolox-medium',
+    // 'efficientdet',
+    // 'yolox-tiny',
+    // 'yolox-medium',
     'poop-yolox-nano',
-    'yolov8',
+    // 'yolov8',
 ] as const
 export type DetectorName = (typeof DETECTOR_NAMES)[number]
 

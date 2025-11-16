@@ -1,3 +1,4 @@
+import { tr } from "@/i18n/i18n";
 import { useTheme } from "@/styles/ThemeContext";
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
@@ -10,9 +11,8 @@ const Home: React.FC = () => {
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.content}>
-        
-        <Text style={styles.title}>Poop detector</Text>
-        <Text style={styles.subtitle}>Finds you dogs poop!</Text>
+        <Text style={styles.title}>{tr('Home.poopDetectorTitle')}</Text>
+        <Text style={styles.subtitle}>{tr('Home.poopDetectorSubtitle')}</Text>
         <Text style={styles.placeholder}>
         </Text>
       </View>

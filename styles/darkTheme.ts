@@ -1,28 +1,48 @@
 const darkTheme = {
     name: "dark",
     colors: {
-        primary: "#043F32",
-        secondary: "#1E1E1E",
+        // Primary colors from splash screen
+        primary: "#5FD4A3", // Mint green accent (from the wave/grass)
+        secondary: "#7DD3F8", // Light blue (from robot)
+        accent: "#C89865", // Warm brown (from hat)
+        
+        // Text colors - high contrast for dark theme
+        text: "#FFFFFF",
         textPrimary: "#FFFFFF",
-        textSecondary: "#A0A0A0",
-        textTertiary: "#fff",
-        textQuaternary: "#888",
-        textQuinary: "#0A2533",
-        backgroundPrimary: "#0A2533",
-        backgroundSecondary: "#232D32",
-        backgroundTertiary: "#404040",
-        backgroundQuaternary: "#232D32",
-        backgroundQuinary: "#232D32",
-        borderPrimary: "#e6ebf2",
-        borderSecondary: "#e6ebf2",
-        border: "#404040",
-        white: "#fff",
-        black: "#000",
-        gray: "#666",
-        error: "#FF4D4F",
-        success: "#52C41A",
-        warning: "#FAAD14",
-        inputBackground: "#232D32",
+        textSecondary: "#A8B5C7",
+        textTertiary: "#7A8899",
+        textQuaternary: "#5A6677",
+        textQuinary: "#FFFFFF",
+        
+        // Background colors - deep navy like splash
+        background: "#0A1628",
+        backgroundPrimary: "#0A1628",
+        backgroundSecondary: "#141B2B",
+        backgroundTertiary: "#1E2936",
+        backgroundQuaternary: "#141B2B",
+        backgroundQuinary: "#1E2936",
+        
+        // Borders - subtle with mint tint
+        border: "#2A3544",
+        borderPrimary: "#2A3544",
+        borderSecondary: "#374455",
+        
+        // Standard colors
+        white: "#FFFFFF",
+        black: "#000000",
+        gray: "#6B7785",
+        
+        // Status colors with mint/teal theme
+        error: "#FF6B6B",
+        success: "#5FD4A3",
+        warning: "#FFB84D",
+        info: "#7DD3F8",
+        
+        // Input styling
+        inputBackground: "#1E2936",
+        inputBorder: "#2A3544",
+        inputText: "#FFFFFF",
+        inputPlaceholder: "#7A8899",
     },
     fonts: {
         regular: "Poppins_400Regular",
