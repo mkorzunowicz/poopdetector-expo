@@ -24,7 +24,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     android: {
         softwareKeyboardLayoutMode: 'pan',
         adaptiveIcon: {
-        foregroundImage: './assets/images/icon.png',
+        foregroundImage: './assets/images/icon2.png',
         backgroundColor: '#ffffff',
         },
         package: 'com.ugs.poopdetector',
@@ -73,13 +73,17 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
           }
         },
         ],
-        ['expo-build-properties'],
+        ["expo-build-properties", {
+          android: {
+            minSdkVersion: 26
+          }
+        }],
         'expo-localization',
         [
         "react-native-fast-tflite",
         {
-            "enableCoreMLDelegate": true,        
-            "enableAndroidGpuLibraries": true
+            enableCoreMLDelegate: true,        
+            enableAndroidGpuLibraries: true
         }
         ]
     ],

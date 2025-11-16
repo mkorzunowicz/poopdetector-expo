@@ -6,9 +6,12 @@ import type { UseDetectorResult } from './types'
 import { createYoloXNanoDetector } from './yoloxNanoDetector'
 
 export function useDetectorYoloXNanoPoop(resizeFn: any): UseDetectorResult {
+  const useShitSpotterModel = false;
+  const modelPath = useShitSpotterModel
+    ? '../../assets/shitspotter-custom-v5-epoch_115_float32.tflite'
+    : '../../assets/yolox_nano_poop_cropped_only_best_float32.tflite';
   const modelHook = useTensorflowModel(
-    require('../../assets/yolox_nano_poop_cropped_only_best_float32.tflite'),
-    
+    require(modelPath),
     Platform.OS === 'ios' ? 'core-ml' : 'android-gpu' 
   )
 
@@ -17,7 +20,7 @@ export function useDetectorYoloXNanoPoop(resizeFn: any): UseDetectorResult {
     if (modelHook.state !== 'loaded') return null
     console.log(`[PoopDetector] Creating poop detector - 1 class, 416x416 input`)
     return createYoloXNanoDetector(modelHook.model, resizeFn, {
-      size: 416, confThr: 0.4, numClasses: 1
+      size: useShitSpotterModel ? 640 : 416, confThr: 0.4, numClasses: 1
     })
   }, [modelHook.state, resizeFn])
 

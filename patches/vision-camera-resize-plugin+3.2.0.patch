@@ -1,8 +1,8 @@
-diff --git a/android/src/main/cpp/ResizePlugin.cpp b/android/src/main/cpp/ResizePlugin.cpp
-index 1111111..2222222 100644
---- a/android/src/main/cpp/ResizePlugin.cpp
-+++ b/android/src/main/cpp/ResizePlugin.cpp
-@@ -393,7 +393,9 @@ FrameBuffer ResizePlugin::convertBufferToDataType(const FrameBuffer& frameBuffe
+diff --git a/node_modules/vision-camera-resize-plugin/android/src/main/cpp/ResizePlugin.cpp b/node_modules/vision-camera-resize-plugin/android/src/main/cpp/ResizePlugin.cpp
+index a547d27..27054bc 100644
+--- a/node_modules/vision-camera-resize-plugin/android/src/main/cpp/ResizePlugin.cpp
++++ b/node_modules/vision-camera-resize-plugin/android/src/main/cpp/ResizePlugin.cpp
+@@ -385,7 +385,9 @@ FrameBuffer ResizePlugin::convertBufferToDataType(const FrameBuffer& frameBuffer
        return frameBuffer;
      case FLOAT32: {
        float* floatData = reinterpret_cast<float*>(destination.data());

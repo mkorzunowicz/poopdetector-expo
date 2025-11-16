@@ -1,8 +1,8 @@
 diff --git a/node_modules/react-native-fast-tflite/android/CMakeLists.txt b/node_modules/react-native-fast-tflite/android/CMakeLists.txt
-index 0000000..1111111 100644
+index 100468c..2616281 100644
 --- a/node_modules/react-native-fast-tflite/android/CMakeLists.txt
 +++ b/node_modules/react-native-fast-tflite/android/CMakeLists.txt
-@@ -32,6 +32,7 @@ add_library(
+@@ -33,6 +33,7 @@ add_library(
    ../cpp/jsi/TypedArray.cpp
    ../cpp/TensorflowPlugin.cpp
    ../cpp/TensorHelpers.cpp
@@ -10,163 +10,185 @@ index 0000000..1111111 100644
    src/main/cpp/Tflite.cpp
  )
  
-@@ -75,6 +76,7 @@ target_link_libraries(
-   fbjni
-   react_nativemodule_core
-   reactnative
-+  log
-   tensorflow-lite
-   tensorflow-lite-gpu
- )
+@@ -50,9 +51,12 @@ target_include_directories(
+ 
+ set_target_properties(${PACKAGE_NAME} PROPERTIES LINKER_LANGUAGE CXX)
+ 
++find_library(log-lib log)
++
+ target_link_libraries(
+   ${PACKAGE_NAME}
+   android                         # <-- log
++  ${log-lib}                      # <-- Android log library
+   ReactAndroid::jsi               # <-- jsi.h
+   fbjni::fbjni                    # <-- fbjni.h
+   ${TFLITE}
 diff --git a/node_modules/react-native-fast-tflite/cpp/TensorflowPlugin.cpp b/node_modules/react-native-fast-tflite/cpp/TensorflowPlugin.cpp
-index 0000000..1111111 100644
+index 36e1887..e6be750 100644
 --- a/node_modules/react-native-fast-tflite/cpp/TensorflowPlugin.cpp
 +++ b/node_modules/react-native-fast-tflite/cpp/TensorflowPlugin.cpp
-@@ -1,5 +1,6 @@
+@@ -9,6 +9,7 @@
  #include "TensorflowPlugin.h"
+ 
  #include "TensorHelpers.h"
 +#include "YoloxPostprocessor.h"
  #include "jsi/Promise.h"
  #include "jsi/TypedArray.h"
- 
-@@ -337,6 +338,64 @@ jsi::Value TensorflowPlugin::copyOutputBuffers(jsi::Runtime& runtime) {
-   return array;
+ #include <chrono>
+@@ -280,6 +281,66 @@ jsi::Value TensorflowPlugin::copyOutputBuffers(jsi::Runtime& runtime) {
+   return result;
  }
  
 +jsi::Value TensorflowPlugin::runYoloxPostprocessing(jsi::Runtime& runtime, const jsi::Object& options) {
-+  // Get the output tensor buffer (should be Float32Array)
-+  auto outputBuffer = getOutputArrayForTensor(runtime, TfLiteInterpreterGetOutputTensor(_interpreter, 0));
++  // Extract postprocessing parameters
++  auto gridData = options.getProperty(runtime, "gridData");
++  auto numClasses = options.getProperty(runtime, "numClasses").asNumber();
++  auto netSize = options.getProperty(runtime, "netSize").asNumber();
++  auto confThreshold = options.getProperty(runtime, "confThreshold").asNumber();
++  auto nmsThreshold = options.getProperty(runtime, "nmsThreshold").asNumber();
++  auto skipNMS = options.hasProperty(runtime, "skipNMS") 
++                    ? options.getProperty(runtime, "skipNMS").asBool() 
++                    : false;
 +  
-+  // Convert TypedArray to float pointer
++  // Get output tensor data as vector
++  const TfLiteTensor* outputTensor = TfLiteInterpreterGetOutputTensor(_interpreter, 0);
++  auto outputBuffer = getOutputArrayForTensor(runtime, outputTensor);
++  TensorHelpers::updateJSBufferFromTensor(runtime, *outputBuffer, outputTensor);
++  
++  // Convert to byte vector then cast to float*
 +  auto tensorBytes = outputBuffer->toVector(runtime);
 +  float* tensorPtr = reinterpret_cast<float*>(tensorBytes.data());
++  size_t tensorSize = tensorBytes.size() / sizeof(float);
++  std::vector<float> tensorData(tensorPtr, tensorPtr + tensorSize);
 +  
-+  // Get grid data from options
-+  auto gridDataArray = options.getProperty(runtime, "gridData").asObject(runtime).asArray(runtime);
-+  size_t gridSize = gridDataArray.size(runtime);
-+  std::vector<float> gridData(gridSize);
-+  for (size_t i = 0; i < gridSize; i++) {
-+    gridData[i] = static_cast<float>(gridDataArray.getValueAtIndex(runtime, i).asNumber());
++  // Convert gridData TypedArray to std::vector<float>
++  std::vector<float> gridVec;
++  if (isTypedArray(runtime, gridData.asObject(runtime))) {
++    TypedArrayBase gridArrayBase = getTypedArray(runtime, gridData.asObject(runtime));
++    auto gridBytes = gridArrayBase.toVector(runtime);
++    float* gridPtr = reinterpret_cast<float*>(gridBytes.data());
++    size_t gridSize = gridBytes.size() / sizeof(float);
++    gridVec.assign(gridPtr, gridPtr + gridSize);
 +  }
-+  
-+  // Get parameters
-+  int numClasses = static_cast<int>(options.getProperty(runtime, "numClasses").asNumber());
-+  int netSize = static_cast<int>(options.getProperty(runtime, "netSize").asNumber());
-+  float confThreshold = static_cast<float>(options.getProperty(runtime, "confThreshold").asNumber());
-+  float nmsThreshold = static_cast<float>(options.getProperty(runtime, "nmsThreshold").asNumber());
-+  bool skipNMS = options.getProperty(runtime, "skipNMS").asBool();
 +  
 +  // Run postprocessing
 +  auto detections = YoloxPostprocessor::postprocess(
-+    tensorPtr,
-+    gridData.data(),
-+    gridSize / 2,  // gridData is [x, y] pairs
-+    numClasses,
-+    netSize,
-+    confThreshold,
-+    nmsThreshold,
++    tensorData,
++    gridVec,
++    static_cast<int>(numClasses),
++    static_cast<int>(netSize),
++    static_cast<float>(confThreshold),
++    static_cast<float>(nmsThreshold),
 +    skipNMS
 +  );
 +  
-+  // Convert detections to JSI array
-+  auto resultArray = jsi::Array(runtime, detections.size());
++  // Convert detections to JSI Array
++  jsi::Array result(runtime, detections.size());
 +  for (size_t i = 0; i < detections.size(); i++) {
-+    auto& det = detections[i];
-+    auto obj = jsi::Object(runtime);
-+    
-+    // Create box array [x1, y1, x2, y2]
-+    auto box = jsi::Array(runtime, 4);
-+    box.setValueAtIndex(runtime, 0, jsi::Value(det.x1));
-+    box.setValueAtIndex(runtime, 1, jsi::Value(det.y1));
-+    box.setValueAtIndex(runtime, 2, jsi::Value(det.x2));
-+    box.setValueAtIndex(runtime, 3, jsi::Value(det.y2));
-+    
-+    obj.setProperty(runtime, "box", box);
-+    obj.setProperty(runtime, "score", jsi::Value(det.score));
-+    obj.setProperty(runtime, "label", jsi::Value(det.label));
-+    
-+    resultArray.setValueAtIndex(runtime, i, obj);
++    const auto& det = detections[i];
++    jsi::Object obj(runtime);
++    obj.setProperty(runtime, "x1", det.x1);
++    obj.setProperty(runtime, "y1", det.y1);
++    obj.setProperty(runtime, "x2", det.x2);
++    obj.setProperty(runtime, "y2", det.y2);
++    obj.setProperty(runtime, "score", det.score);
++    obj.setProperty(runtime, "classId", det.classId);
++    result.setValueAtIndex(runtime, i, std::move(obj));
 +  }
 +  
-+  return resultArray;
++  return result;
 +}
 +
- jsi::Value TensorflowPlugin::runSync(jsi::Runtime& runtime, const jsi::Value& inputsValue,
-                                      const jsi::Value& optionsValue) {
-   if (!inputsValue.isObject() || !inputsValue.asObject(runtime).isArray(runtime)) {
-@@ -350,6 +409,15 @@ jsi::Value TensorflowPlugin::runSync(jsi::Runtime& runtime, const jsi::Value& i
-   copyInputBuffers(runtime, inputs);
-   run();
+ void TensorflowPlugin::run() {
+   // Run Model
+   TfLiteStatus status = TfLiteInterpreterInvoke(_interpreter);
+@@ -295,14 +356,21 @@ jsi::Value TensorflowPlugin::get(jsi::Runtime& runtime, const jsi::PropNameID& p
  
-+  // Check if options contains yoloxPostprocess flag
-+  if (!optionsValue.isUndefined() && optionsValue.isObject()) {
-+    auto options = optionsValue.asObject(runtime);
-+    if (options.hasProperty(runtime, "yoloxPostprocess") && 
-+        options.getProperty(runtime, "yoloxPostprocess").asBool()) {
+   if (propName == "runSync") {
+     return jsi::Function::createFromHostFunction(
+-        runtime, jsi::PropNameID::forAscii(runtime, "runModel"), 1,
++        runtime, jsi::PropNameID::forAscii(runtime, "runModel"), 2,
+         [=](jsi::Runtime& runtime, const jsi::Value& thisValue, const jsi::Value* arguments,
+             size_t count) -> jsi::Value {
+           // 1.
+           copyInputBuffers(runtime, arguments[0].asObject(runtime));
+           // 2.
+           this->run();
+-          // 3.
++          // 3. Check if YoloX postprocessing is requested
++          if (count > 1 && arguments[1].isObject()) {
++            auto options = arguments[1].asObject(runtime);
++            if (options.hasProperty(runtime, "yoloxPostprocess") &&
++                options.getProperty(runtime, "yoloxPostprocess").asBool()) {
 +              return runYoloxPostprocessing(runtime, options);
-+    }
-+  }
-+
-   return copyOutputBuffers(runtime);
- }
- 
++            }
++          }
+           return copyOutputBuffers(runtime);
+         });
+   } else if (propName == "run") {
 diff --git a/node_modules/react-native-fast-tflite/cpp/TensorflowPlugin.h b/node_modules/react-native-fast-tflite/cpp/TensorflowPlugin.h
-index 0000000..1111111 100644
+index 0da4822..2de7da5 100644
 --- a/node_modules/react-native-fast-tflite/cpp/TensorflowPlugin.h
 +++ b/node_modules/react-native-fast-tflite/cpp/TensorflowPlugin.h
-@@ -60,6 +60,7 @@ private:
-   std::shared_ptr<TypedArrayBase> getInputArrayForTensor(jsi::Runtime& runtime, const TfLiteTensor* tensor);
-   std::shared_ptr<TypedArrayBase> getOutputArrayForTensor(jsi::Runtime& runtime,
-                                                             const TfLiteTensor* tensor);
+@@ -52,6 +52,7 @@ private:
+   void copyInputBuffers(jsi::Runtime& runtime, jsi::Object inputValues);
+   void run();
+   jsi::Value copyOutputBuffers(jsi::Runtime& runtime);
 +  jsi::Value runYoloxPostprocessing(jsi::Runtime& runtime, const jsi::Object& options);
  
- private:
-   TfLiteModel* _model;
+   std::shared_ptr<TypedArrayBase> getOutputArrayForTensor(jsi::Runtime& runtime,
+                                                           const TfLiteTensor* tensor);
 diff --git a/node_modules/react-native-fast-tflite/cpp/YoloxPostprocessor.cpp b/node_modules/react-native-fast-tflite/cpp/YoloxPostprocessor.cpp
 new file mode 100644
-index 0000000..0000000
+index 0000000..ee8b212
 --- /dev/null
 +++ b/node_modules/react-native-fast-tflite/cpp/YoloxPostprocessor.cpp
 @@ -0,0 +1,163 @@
 +#include "YoloxPostprocessor.h"
 +#include <algorithm>
-+#include <cmath>
++#include <chrono>
 +
-+// Fast approximations for sigmoid and exp
++// Fast sigmoid approximation using polynomial
 +float YoloxPostprocessor::fastSigmoid(float x) {
-+    // Polynomial approximation: 1 / (1 + exp(-x))
-+    // Using rational approximation for speed
 +    if (x >= 0) {
-+        float z = std::exp(-x);
++        float z = fastExp(-x);
 +        return 1.0f / (1.0f + z);
 +    } else {
-+        float z = std::exp(x);
++        float z = fastExp(x);
 +        return z / (1.0f + z);
 +    }
 +}
 +
++// Fast exp approximation using polynomial
 +float YoloxPostprocessor::fastExp(float x) {
-+    // Clamp to prevent overflow
-+    x = std::max(-10.0f, std::min(10.0f, x));
-+    return std::exp(x);
++    if (x < -10.0f) return 0.0f;
++    if (x > 10.0f) return 22026.465f;
++    
++    // Polynomial approximation
++    x = 1.0f + x / 256.0f;
++    x *= x; x *= x; x *= x; x *= x;
++    x *= x; x *= x; x *= x; x *= x;
++    return x;
 +}
 +
 +// Calculate IoU between two detections
 +float YoloxPostprocessor::calcIoU(const Detection& a, const Detection& b) {
-+    float x1 = std::max(a.x1, b.x1);
-+    float y1 = std::max(a.y1, b.y1);
-+    float x2 = std::min(a.x2, b.x2);
-+    float y2 = std::min(a.y2, b.y2);
++    float interX1 = std::max(a.x1, b.x1);
++    float interY1 = std::max(a.y1, b.y1);
++    float interX2 = std::min(a.x2, b.x2);
++    float interY2 = std::min(a.y2, b.y2);
 +    
-+    float intersectWidth = std::max(0.0f, x2 - x1);
-+    float intersectHeight = std::max(0.0f, y2 - y1);
-+    float intersectArea = intersectWidth * intersectHeight;
++    float interWidth = std::max(0.0f, interX2 - interX1);
++    float interHeight = std::max(0.0f, interY2 - interY1);
++    float interArea = interWidth * interHeight;
++    
++    if (interArea == 0.0f) return 0.0f;
 +    
 +    float areaA = (a.x2 - a.x1) * (a.y2 - a.y1);
 +    float areaB = (b.x2 - b.x1) * (b.y2 - b.y1);
-+    float unionArea = areaA + areaB - intersectArea;
++    float unionArea = areaA + areaB - interArea;
 +    
-+    return (unionArea > 0) ? (intersectArea / unionArea) : 0.0f;
++    return interArea / unionArea;
 +}
 +
 +// Apply Non-Maximum Suppression
@@ -203,112 +225,113 @@ index 0000000..0000000
 +    detections = std::move(result);
 +}
 +
-+// Main postprocessing function
 +std::vector<Detection> YoloxPostprocessor::postprocess(
-+    const float* tensorData,
-+    const float* gridData,
-+    int gridSize,
++    const std::vector<float>& tensorData,
++    const std::vector<float>& gridData,
 +    int numClasses,
 +    int netSize,
 +    float confThreshold,
 +    float nmsThreshold,
 +    bool skipNMS
 +) {
-+    std::vector<Detection> detections;
++    std::vector<Detection> proposals;
 +    
-+    // Process each grid cell
-+    for (int i = 0; i < gridSize; i++) {
-+        // Tensor layout: [batch=1, num_anchors, 5+num_classes]
-+        // Each anchor has: [x, y, w, h, obj_conf, class_probs...]
-+        const float* anchor = &tensorData[i * (5 + numClasses)];
++    int numBoxFields = 5; // x, y, w, h, obj_conf
++    int numAnchors = gridData.size() / 3; // Each grid point has x, y, stride
++    
++    // Generate proposals
++    for (int i = 0; i < numAnchors; i++) {
++        int gridIdx = i * 3;
++        float gridX = gridData[gridIdx];
++        float gridY = gridData[gridIdx + 1];
++        float stride = gridData[gridIdx + 2];
 +        
-+        // Get grid coordinates
-+        float gridX = gridData[i * 2];
-+        float gridY = gridData[i * 2 + 1];
++        int tensorIdx = i * (numBoxFields + numClasses);
 +        
-+        // Extract raw values
-+        float rawX = anchor[0];
-+        float rawY = anchor[1];
-+        float rawW = anchor[2];
-+        float rawH = anchor[3];
-+        float rawObjConf = anchor[4];
++        // Get objectness confidence
++        float objConf = fastSigmoid(tensorData[tensorIdx + 4]);
 +        
-+        // Apply sigmoid to obj confidence
-+        float objConf = fastSigmoid(rawObjConf);
++        if (objConf < confThreshold) continue;
 +        
-+        // Process each class
-+        for (int c = 0; c < numClasses; c++) {
-+            float rawClassProb = anchor[5 + c];
-+            float classProb = fastSigmoid(rawClassProb);
-+            
-+            // Final confidence = obj_conf * class_prob
-+            float confidence = objConf * classProb;
-+            
-+            if (confidence < confThreshold) continue;
-+            
-+            // Decode box coordinates
-+            // YoloX uses: center = (raw + grid) * stride, size = exp(raw) * stride
-+            // But since we're at feature map level, stride = netSize / gridSize
-+            // For 416x416 with 52x52 grid: stride = 8
-+            // However, the tensor already contains normalized predictions
-+            
-+            float centerX = (rawX + gridX);
-+            float centerY = (rawY + gridY);
-+            float width = fastExp(rawW);
-+            float height = fastExp(rawH);
-+            
-+            // Create detection with normalized coordinates [0-1]
-+            Detection det;
-+            det.x1 = (centerX - width / 2.0f) / netSize;
-+            det.y1 = (centerY - height / 2.0f) / netSize;
-+            det.x2 = (centerX + width / 2.0f) / netSize;
-+            det.y2 = (centerY + height / 2.0f) / netSize;
-+            det.score = confidence;
-+            det.label = c;
-+            
-+            // Clamp coordinates to [0, 1]
-+            det.x1 = std::max(0.0f, std::min(1.0f, det.x1));
-+            det.y1 = std::max(0.0f, std::min(1.0f, det.y1));
-+            det.x2 = std::max(0.0f, std::min(1.0f, det.x2));
-+            det.y2 = std::max(0.0f, std::min(1.0f, det.y2));
-+            
-+            // Validate box
-+            if (det.x2 > det.x1 && det.y2 > det.y1) {
-+                detections.push_back(det);
++        // Get box coordinates
++        float dx = fastSigmoid(tensorData[tensorIdx + 0]);
++        float dy = fastSigmoid(tensorData[tensorIdx + 1]);
++        float dw = fastExp(tensorData[tensorIdx + 2]);
++        float dh = fastExp(tensorData[tensorIdx + 3]);
++        
++        float centerX = (gridX + dx) * stride;
++        float centerY = (gridY + dy) * stride;
++        float width = dw * stride;
++        float height = dh * stride;
++        
++        // Get class scores
++        int maxClassId = 0;
++        float maxClassScore = tensorData[tensorIdx + numBoxFields];
++        
++        for (int c = 1; c < numClasses; c++) {
++            float score = tensorData[tensorIdx + numBoxFields + c];
++            if (score > maxClassScore) {
++                maxClassScore = score;
++                maxClassId = c;
 +            }
 +        }
++        
++        float classConf = fastSigmoid(maxClassScore);
++        float finalScore = objConf * classConf;
++        
++        if (finalScore < confThreshold) continue;
++        
++        // Create detection with NORMALIZED coordinates [0-1]
++        Detection det;
++        det.x1 = (centerX - width / 2.0f) / netSize;
++        det.y1 = (centerY - height / 2.0f) / netSize;
++        det.x2 = (centerX + width / 2.0f) / netSize;
++        det.y2 = (centerY + height / 2.0f) / netSize;
++        det.score = finalScore;
++        det.classId = maxClassId;
++        
++        proposals.push_back(det);
 +    }
 +    
-+    // Apply NMS if not skipped
-+    if (!skipNMS && !detections.empty()) {
-+        applyNMS(detections, nmsThreshold);
++    // Apply NMS
++    if (!skipNMS && !proposals.empty()) {
++        applyNMS(proposals, nmsThreshold);
 +    }
 +    
-+    return detections;
++    // Limit to top 20 detections
++    if (proposals.size() > 20) {
++        std::sort(proposals.begin(), proposals.end(),
++                  [](const Detection& a, const Detection& b) { return a.score > b.score; });
++        proposals.resize(20);
++    }
++    
++    return proposals;
 +}
 diff --git a/node_modules/react-native-fast-tflite/cpp/YoloxPostprocessor.h b/node_modules/react-native-fast-tflite/cpp/YoloxPostprocessor.h
 new file mode 100644
-index 0000000..0000000
+index 0000000..2b3b082
 --- /dev/null
 +++ b/node_modules/react-native-fast-tflite/cpp/YoloxPostprocessor.h
-@@ -0,0 +1,37 @@
+@@ -0,0 +1,32 @@
 +#pragma once
 +
 +#include <vector>
++#include <cmath>
 +
 +struct Detection {
-+    float x1, y1, x2, y2;  // Bounding box coordinates (normalized 0-1)
-+    float score;            // Confidence score
-+    int label;              // Class label
++    float x1;
++    float y1;
++    float x2;
++    float y2;
++    float score;
++    int classId;
 +};
 +
 +class YoloxPostprocessor {
 +public:
-+    // Main postprocessing function
 +    static std::vector<Detection> postprocess(
-+        const float* tensorData,
-+        const float* gridData,
-+        int gridSize,
++        const std::vector<float>& tensorData,
++        const std::vector<float>& gridData,
 +        int numClasses,
 +        int netSize,
 +        float confThreshold,
@@ -317,11 +340,8 @@ index 0000000..0000000
 +    );
 +
 +private:
-+    // Fast approximations
 +    static float fastSigmoid(float x);
 +    static float fastExp(float x);
-+    
-+    // NMS helpers
 +    static float calcIoU(const Detection& a, const Detection& b);
 +    static void applyNMS(std::vector<Detection>& detections, float threshold);
 +};
