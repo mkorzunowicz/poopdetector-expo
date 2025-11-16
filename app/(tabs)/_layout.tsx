@@ -26,7 +26,7 @@ function BottomTabNavigator() {
         options={{
           title: '',
           tabBarIcon: ({ color, focused }: { color: string; focused: boolean }) => (
-            <Ionicons name={focused ? 'home' : 'home-outline'} color={color} size={24} />
+            <Ionicons name={focused ? 'images' : 'images-outline'} color={color} size={24} />
           ),
         }}
       />

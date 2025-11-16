@@ -28,6 +28,7 @@
     "expo-image-picker": "^17.0.8",
     "expo-linking": "~8.0.8",
     "expo-localization": "~17.0.7",
+    "expo-media-library": "~18.2.0",
     "expo-router": "~6.0.14",
     "expo-sensors": "^15.0.7",
     "expo-splash-screen": "~31.0.10",

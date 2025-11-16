@@ -77,6 +77,16 @@ export const translations = {
       welcome: "Welcome to Object Detector",
       poopDetectorTitle: "Poop Detector",
       poopDetectorSubtitle: "Finds your dog's poop!",
+      gallery: "Photo Gallery",
+      noPhotos: "No photos yet. Take a photo with the camera!",
+      photosSaved: "Photos Saved",
+    },
+    Media: {
+      saveToGallery: "Save to Gallery",
+      saved: "Saved to gallery!",
+      saveFailed: "Failed to save photo",
+      permissionDenied: "Media library permission denied",
+      permissionNeeded: "Media library access is needed to save photos",
     },
     Camera: {
       initializingCamera: "Initializing camera...",
@@ -215,6 +225,16 @@ export const translations = {
       welcome: "Witamy w Detektorze Obiektów",
       poopDetectorTitle: "Detektor Kupy",
       poopDetectorSubtitle: "Znajduje kupę twojego psa!",
+      gallery: "Galeria Zdjęć",
+      noPhotos: "Brak zdjęć. Zrób zdjęcie kamerą!",
+      photosSaved: "Zapisane Zdjęcia",
+    },
+    Media: {
+      saveToGallery: "Zapisz do Galerii",
+      saved: "Zapisano do galerii!",
+      saveFailed: "Nie udało się zapisać zdjęcia",
+      permissionDenied: "Odmówiono dostępu do biblioteki multimediów",
+      permissionNeeded: "Dostęp do biblioteki multimediów jest potrzebny do zapisywania zdjęć",
     },
     Camera: {
       initializingCamera: "Inicjalizacja kamery...",

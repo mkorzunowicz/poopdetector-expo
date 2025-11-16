@@ -59,6 +59,14 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
         },
         ],
         [
+        'expo-media-library',
+        {
+            photosPermission: 'Allow Poop Detector to save photos to your gallery.',
+            savePhotosPermission: 'Allow Poop Detector to save photos to your gallery.',
+            isAccessMediaLocationEnabled: true,
+        },
+        ],
+        [
         "expo-splash-screen",
         {
           "ios": {
