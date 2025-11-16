@@ -20,7 +20,7 @@ import { Worklets } from 'react-native-worklets-core'
 import { DETECTOR_NAMES, DetectorName, useDetector } from '@/ai/detectors'
 import { Detection } from '@/ai/detectors/types'
 import { useFocusEffect } from '@react-navigation/core'
-import { ActivityIndicator, Dimensions, Platform, StyleSheet, Text, TouchableOpacity, View } from "react-native"
+import { Dimensions, StyleSheet, Text, TouchableOpacity, View } from "react-native"
 import { useResizePlugin } from 'vision-camera-resize-plugin'
 
 import { CaptureButton } from '@/components/buttons/CaptureButton'
@@ -77,8 +77,13 @@ const CameraPage: React.FC = () => {
     if (!isActive) {
       console.log('[Camera] Camera inactive - clearing detections and pausing processing')
       setDetections([])
+      // Reset adaptive FPS when becoming inactive
+      detectionTimesRef.current = []
+      setDetectionFpsHistory([])
     } else {
       console.log('[Camera] Camera active - resuming processing')
+      // Start with conservative FPS when becoming active
+      setAdaptiveTargetFps(3)
     }
   }, [isActive])
 
@@ -241,18 +246,46 @@ const CameraPage: React.FC = () => {
 
   const [selected, setSelected] = useState<DetectorName>('poop-yolox-nano')
   const { detect, meta, ready } = useDetector(selected, resize)
+
+  // Adaptive FPS based on detection performance
+  const [adaptiveTargetFps, setAdaptiveTargetFps] = useState(3)
+  const detectionTimesRef = useRef<number[]>([])
+  const [detectionFpsHistory, setDetectionFpsHistory] = useState<number[]>([])
   
-  // Show loading indicator while model is initializing
-  const [showModelLoader, setShowModelLoader] = useState(true)
-  useEffect(() => {
-    if (ready) {
-      // Small delay to ensure smooth transition
-      const timer = setTimeout(() => setShowModelLoader(false), 300)
-      return () => clearTimeout(timer)
-    } else {
-      setShowModelLoader(true)
-    }
-  }, [ready])
+  const updateAdaptiveFps = useMemo(
+    () =>
+      Worklets.createRunOnJS((detectionTimeMs: number) => {
+        // Keep rolling average of last 5 detection times
+        detectionTimesRef.current.push(detectionTimeMs)
+        if (detectionTimesRef.current.length > 5) {
+          detectionTimesRef.current.shift()
+        }
+        
+        // Calculate average detection time
+        const avgTime = detectionTimesRef.current.reduce((a, b) => a + b, 0) / detectionTimesRef.current.length
+        
+        // Target 80% CPU utilization: if detection takes Xms, run at floor(800/X) fps
+        // This ensures we leave 20% headroom for the system
+        const idealFps = Math.floor(800 / avgTime)
+        
+        // Clamp between 1-10 fps for safety
+        const newFps = Math.max(1, Math.min(10, idealFps))
+        
+        // Update FPS history for graph (keep last 60 values for smooth visualization)
+        const currentFps = 1000 / detectionTimeMs
+        setDetectionFpsHistory(prev => {
+          const updated = [...prev, currentFps]
+          return updated.slice(-60) // Keep last 60 frames
+        })
+        
+        // Only update if it changed significantly (avoid constant small adjustments)
+        if (Math.abs(newFps - adaptiveTargetFps) >= 1) {
+          console.log(`[AdaptiveFPS] Avg detection: ${avgTime.toFixed(0)}ms -> Target FPS: ${newFps}`)
+          setAdaptiveTargetFps(newFps)
+        }
+      }),
+    [adaptiveTargetFps],
+  )
 
   //#region FrameProcessor
 
@@ -263,16 +296,18 @@ const CameraPage: React.FC = () => {
     if (!isActive || !detect || !ready) {
       return
     }
-    var targetFps = Platform.OS === 'ios' ? 5 : 5;
 
-    runAtTargetFps(targetFps, () => {
+    runAtTargetFps(adaptiveTargetFps, () => {
       const t0 = Date.now()
       const dets = detect(frame, device?.position == 'front')
       const totalTime = Date.now() - t0
-      console.log(`[FrameProcessor] Detection completed in ${totalTime}ms, found ${dets.length} objects`)
+      console.log(`[FrameProcessor] Detection completed in ${totalTime}ms, found ${dets.length} objects @ ${adaptiveTargetFps}fps`)
       updateDetectionsJS(dets)
+      
+      // Update adaptive FPS based on detection time
+      updateAdaptiveFps(totalTime)
     })
-  }, [isActive, detect, ready, device])
+  }, [isActive, detect, ready, device, adaptiveTargetFps, updateAdaptiveFps])
 
   //#endregion
 
@@ -292,7 +327,6 @@ const CameraPage: React.FC = () => {
       </View>
     )
   }
-
   return (
     <View style={styles.container}
       onLayout={e => {
@@ -346,15 +380,6 @@ const CameraPage: React.FC = () => {
             mirrored={cameraPosition === 'front'}
           />
 
-          {showModelLoader && (
-            <View style={styles.modelLoaderOverlay}>
-              <View style={styles.modelLoaderCard}>
-                <ActivityIndicator size="large" color="#4A90E2" />
-                <Text style={styles.modelLoaderText}>{tr('Camera.loadingModel')}</Text>
-              </View>
-            </View>
-          )}
-
           {cameraError && (
             <View style={styles.errorOverlay}>
               <View style={styles.errorCard}>
@@ -388,13 +413,36 @@ const CameraPage: React.FC = () => {
         setIsPressingButton={setIsPressingButton}
       />
 
-      <View style={{ position: 'absolute', top: 90, left: 10, zIndex: 99 }}>
+      <View style={{ position: 'absolute', top: 130, left: 10, zIndex: 99 }}>
         {DETECTOR_NAMES.map(n => (
           <TouchableOpacity key={n} onPress={() => setSelected(n)}>
             <Text style={{ color: selected === n ? 'lime' : 'white' }}>{n}</Text>
           </TouchableOpacity>
         ))}
       </View>
+
+      {/* Detection FPS Graph */}
+      {detectionFpsHistory.length > 0 && (
+        <View style={styles.detectionFpsGraph}>
+          <View style={styles.detectionFpsGraphBars}>
+            {[...detectionFpsHistory].slice(0, 40).map((fps, index) => {
+              const height = Math.min((fps / 10) * 40, 40) // Scale to max 40px height (10 fps = full)
+              return (
+                <View
+                  key={index}
+                  style={{
+                    width: 2,
+                    height,
+                    backgroundColor: '#7DD3F8', // Blue color from theme
+                    marginLeft: 0,
+                  }}
+                />
+              )
+            })}
+          </View>
+          <Text style={styles.detectionFpsText}>{adaptiveTargetFps} FPS</Text>
+        </View>
+      )}
 
       <View style={[styles.rightButtonRow, { right: insets.right + CONTENT_SPACING, top: insets.top + CONTENT_SPACING }]}>
         <TouchableOpacity style={styles.button} onPress={onFlipCameraPressed} >
@@ -514,6 +562,30 @@ const styles = StyleSheet.create({
     color: '#666',
     textAlign: 'center',
     fontStyle: 'italic',
+  },
+  detectionFpsGraph: {
+    position: 'absolute',
+    top: 70,
+    left: 0,
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    height: 40,
+    paddingLeft: 0,
+    paddingRight: 8,
+    paddingVertical: 2,
+  },
+  detectionFpsText: {
+    position: 'absolute',
+    left: 8,
+    top: 8,
+    color: 'white',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  detectionFpsGraphBars: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    height: 40,
   },
 })
 

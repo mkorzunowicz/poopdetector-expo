@@ -25,12 +25,13 @@ const WelcomeScreen: React.FC = () => {
       console.warn('Failed to persist onboarding completion', err);
     }
 
-    router.replace("/(tabs)");
+    // After onboarding, go to camera loader to load AI model
+    router.replace("/camera-loader");
   };
 
   const handleLogin = () => {
-    // Login not implemented yet, redirect to tabs
-    router.replace("/(tabs)");
+    // Login not implemented yet, redirect to camera loader
+    router.replace("/camera-loader");
   };
 
   useEffect(() => {
@@ -42,8 +43,8 @@ const WelcomeScreen: React.FC = () => {
         const completed = await AsyncStorage.getItem('@onboardingCompleted');
 
         if (completed === 'true') {
-          // already completed, navigate straight to main tabs
-          router.replace('/(tabs)');
+          // already completed, navigate to camera loader first (loads AI model)
+          router.replace('/camera-loader');
           return;
         }
 

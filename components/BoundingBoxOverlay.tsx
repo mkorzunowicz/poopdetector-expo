@@ -65,9 +65,9 @@ export const BoundingBoxOverlay = React.memo(
             h = mapY(d.y2) - y
             
             // Debug: log coordinate transformation
-            if (i === 0) {
-              console.log(`[Overlay] Detection ${i}: original=[${d.x1.toFixed(3)},${d.y1.toFixed(3)},${d.x2.toFixed(3)},${d.y2.toFixed(3)}] -> screen=[${x.toFixed(1)},${y.toFixed(1)},${w.toFixed(1)},${h.toFixed(1)}] mirrored=${mirrored}`)
-            }
+            // if (i === 0) {
+            //   console.log(`[Overlay] Detection ${i}: original=[${d.x1.toFixed(3)},${d.y1.toFixed(3)},${d.x2.toFixed(3)},${d.y2.toFixed(3)}] -> screen=[${x.toFixed(1)},${y.toFixed(1)},${w.toFixed(1)},${h.toFixed(1)}] mirrored=${mirrored}`)
+            // }
 
             return (
               <React.Fragment key={i}>

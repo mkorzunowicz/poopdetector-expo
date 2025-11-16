@@ -356,7 +356,7 @@ export function createYoloXNanoDetector(
     const t4 = Date.now()
 
     // // Add debug logging
-    console.log(`[YoloXNano] Total detection time: ${t4 - t0}ms, resize: ${t2-t0}ms, inference: ${t3 - t2}ms, postproc: ${t4 - t3}ms, in[${frame.width}x${frame.height}] -> [${inSize}x${inSize}]`)
+    // console.log(`[YoloXNano] Total detection time: ${t4 - t0}ms, resize: ${t2-t0}ms, inference: ${t3 - t2}ms, postproc: ${t4 - t3}ms, in[${frame.width}x${frame.height}] -> [${inSize}x${inSize}]`)
 
     return transformedDetections
   }
