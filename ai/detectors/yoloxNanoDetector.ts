@@ -285,7 +285,8 @@ export function createYoloXNanoDetector(
     /* 1) preprocess ------------------------------------------------------ */
     const t0 = Date.now()
     
-    // Get Float32Array [0-255] directly from native resize plugin (patched)
+    // Get Float32Array directly from native resize plugin (patched)
+    // Android patch keeps values in [0-255] range, iOS patch also keeps [0-255] range
     const inputData = resizeFn(frame, {
       scale: { width: inSize, height: inSize },
       crop: { y: 0, x: 0, width: frame.width, height: frame.height },

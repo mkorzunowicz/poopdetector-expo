@@ -6,10 +6,12 @@ import type { UseDetectorResult } from './types'
 import { createYoloXNanoDetector } from './yoloxNanoDetector'
 
 export function useDetectorYoloXNanoPoop(resizeFn: any): UseDetectorResult {
-  const useShitSpotterModel = false;
-  const modelPath = useShitSpotterModel
-    ? '../../assets/shitspotter-custom-v5-epoch_115_float32.tflite'
-    : '../../assets/yolox_nano_poop_cropped_only_best_float32.tflite';
+  const useShitSpotterModel = true;
+
+  // Define model assets statically for require() to work
+  const modelAsset = useShitSpotterModel
+    ? require('../../assets/shitspotter-custom-v5-epoch_115_float32.tflite')
+    : require('../../assets/yolox_nano_poop_cropped_only_best_float32.tflite');
     
   const loadStartTime = useMemo(() => {
     const time = Date.now();
@@ -21,12 +23,12 @@ export function useDetectorYoloXNanoPoop(resizeFn: any): UseDetectorResult {
   const [useFallback, setUseFallback] = useState(false);
   
   const gpuModelHook = useTensorflowModel(
-    require(modelPath),
+    modelAsset,
     Platform.OS === 'ios' ? 'core-ml' : 'android-gpu'
   );
   
   const cpuModelHook = useTensorflowModel(
-    useFallback ? require(modelPath) : null
+    modelAsset
   );
   
   // Check if GPU failed and trigger CPU fallback
@@ -37,8 +39,8 @@ export function useDetectorYoloXNanoPoop(resizeFn: any): UseDetectorResult {
     }
   }, [gpuModelHook.state, useFallback]);
   
-  // Use whichever model is active
-  const modelHook = useFallback ? cpuModelHook : gpuModelHook;
+  // Use whichever model is active - prefer GPU if loaded, fallback to CPU if GPU fails
+  const modelHook = useFallback && cpuModelHook.state === 'loaded' ? cpuModelHook : gpuModelHook;
 
   // Track state changes
   useEffect(() => {
