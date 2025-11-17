@@ -5,8 +5,8 @@ A real-time AI-powered object detection app built with React Native and Expo tha
 ## What it does
 
 - **Real-time camera detection**: Uses your device camera to detect objects in real-time
-- **AI-powered detection**: Leverages optimized YoloX TensorFlow Lite models for fast and accurate detection  
-- **Save detections**: Capture and save images (no bounding boxes or SAM saved)
+- **AI-powered detection**: Leverages optimized YoloX TensorFlow Lite models for fast and accurate detection. Quantized models didn't work yet. Not sure we can gain here anything, but needs further testing.
+- **Save detections**: Capture and save images (no bounding boxes included, SAM not implemented)
 - **Multi-model support**: Switch between different detection models right in the app by clicking it's name
 - **Cross-platform**: Works on both iOS and Android with native performance optimizations
 
@@ -58,22 +58,16 @@ npx expo run:android
 ### iOS
 - Uses CoreML delegate for optimized inference
 - Native YoloX postprocessing in C++
-- Supports all device orientations
-- Requires camera and photo library permissions
 
 ### Android  
-- Uses GPU delegate for accelerated inference
+- Uses GPU delegate for accelerated inference, fallsback to CPU if not supported
 - Native YoloX postprocessing in C++
-- Optimized memory management
-- Requires camera and storage permissions
 
 ## Technical Features
 
 - **Worklet-based frame processing**: Ultra-fast camera frame processing using React Native Worklets
 - **Native TensorFlow Lite**: Custom patches for optimized model inference 
 - **Adaptive frame rates**: Dynamic FPS adjustment based on performance
-- **Memory optimization**: Efficient tensor operations and garbage collection
-- **Multi-threading**: Background model loading and inference
 
 ## Performance
 
@@ -97,20 +91,6 @@ app/
 patches/              # Platform compatibility patches
 assets/               # Model files and images
 ```
-
-## Permissions Required
-
-The app requires the following permissions:
-
-**iOS (Info.plist)**:
-- `NSCameraUsageDescription`: Camera access for real-time detection
-- `NSMicrophoneUsageDescription`: Microphone access for video recording
-- `NSPhotoLibraryUsageDescription`: Photo library access for saving images
-
-**Android (AndroidManifest.xml)**:
-- `CAMERA`: Camera access for detection
-- `RECORD_AUDIO`: Audio recording for videos
-- `READ_EXTERNAL_STORAGE` / `WRITE_EXTERNAL_STORAGE`: File storage access
 
 ## Development Notes
 
