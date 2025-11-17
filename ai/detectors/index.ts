@@ -2,21 +2,15 @@ import { UseDetectorResult } from './types'
 import { useDetectorYoloXNanoPoop } from './useDetectorPoopYoloXNano'
 
 export const DETECTOR_NAMES = [
-    // 'efficientdet',
-    // 'yolox-tiny',
-    // 'yolox-medium',
+    'shitspotter',
     'poop-yolox-nano',
-    // 'yolov8',
 ] as const
 export type DetectorName = (typeof DETECTOR_NAMES)[number]
 
 export function useDetector(name: DetectorName, resizeFn: Function): UseDetectorResult {
     switch (name) {
-        // case 'yolox-tiny': return useDetectorYoloNano(resizeFn)
-        // case 'efficientdet': return useDetectorEffDet(resizeFn)
-        case 'poop-yolox-nano': return useDetectorYoloXNanoPoop(resizeFn)
-        // case 'yolov8': return useDetectorYolov8(resizeFn)
-        // case 'yolox-medium': return useDetectorYoloXMedium(resizeFn)
+        case 'poop-yolox-nano': return useDetectorYoloXNanoPoop(resizeFn, false)
+        case 'shitspotter': return useDetectorYoloXNanoPoop(resizeFn, true)
         default: return { detect: null, meta: null, ready: false }
     }
 }

@@ -1,50 +1,121 @@
-# Welcome to your Expo app 👋
+# Poop Detector 💩
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+A real-time AI-powered object detection app built with React Native and Expo that uses YoloX models to detect objects through your device camera.
 
-## Get started
+## What it does
 
-1. Install dependencies
+- **Real-time camera detection**: Uses your device camera to detect objects in real-time
+- **AI-powered detection**: Leverages optimized YoloX TensorFlow Lite models for fast and accurate detection  
+- **Save detections**: Capture and save images (no bounding boxes or SAM saved)
+- **Multi-model support**: Switch between different detection models right in the app by clicking it's name
+- **Cross-platform**: Works on both iOS and Android with native performance optimizations
 
-   ```bash
-   npm install
-   ```
+## AI Models
 
-2. Start the app
+The app uses pre-trained YoloX models from the [tflite_models repository](https://github.com/mkorzunowicz/tflite_models/releases/tag/tflite2):
 
-   ```bash
-   npx expo start
-   ```
+Put the models into **./assets** directory. Remote download should be supported by the tflite library, but it didn't work yet. I'll see if I can get an alternative way to work.
 
-In the output, you'll find options to open the app in a
+Currently hardcoded:
+- **YoloX Nano Poop**: YoloX Nano 416 old model dated 2024
+- **ShitSpotter v5**: Erotemic's YoloX recent 640 model
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+## Installation & Setup
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+### Prerequisites
 
-## Get a fresh project
+- Node.js (v18 or higher)
+- npm
+- For iOS: Xcode and iOS Simulator
+- For Android: Android Studio and Android SDK
 
-When you're ready, run:
+### Install Dependencies
 
 ```bash
-npm run reset-project
+npm install
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+This will automatically:
+- Install all React Native and Expo dependencies
+- Apply necessary patches for iOS/Android compatibility via `patch-package`
+- Set up TensorFlow Lite and camera plugins
 
-## Learn more
+### Development Scripts
 
-To learn more about developing your project with Expo, look at the following resources:
+#### Run on Specific Platforms
+```bash
+# iOS
+npx expo run:ios
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+# Android
+npx expo run:android
 
-## Join the community
+# web isn't supported
+```
 
-Join our community of developers creating universal apps.
+## Platform Support
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+### iOS
+- Uses CoreML delegate for optimized inference
+- Native YoloX postprocessing in C++
+- Supports all device orientations
+- Requires camera and photo library permissions
+
+### Android  
+- Uses GPU delegate for accelerated inference
+- Native YoloX postprocessing in C++
+- Optimized memory management
+- Requires camera and storage permissions
+
+## Technical Features
+
+- **Worklet-based frame processing**: Ultra-fast camera frame processing using React Native Worklets
+- **Native TensorFlow Lite**: Custom patches for optimized model inference 
+- **Adaptive frame rates**: Dynamic FPS adjustment based on performance
+- **Memory optimization**: Efficient tensor operations and garbage collection
+- **Multi-threading**: Background model loading and inference
+
+## Performance
+
+iOS (iPhone 15): detection takes 30ms (nano 416), 50ms shitspotter
+
+Android (Samsung S10): 100ms (nano 416), 300ms shitspotter
+
+## Architecture
+
+```
+app/
+├── (tabs)/           # Tab navigation screens
+├── ai/
+│   ├── detectors/    # YoloX detection implementations
+├── components/       # Reusable UI components  
+├── hooks/            # Custom React hooks
+├── services/         # App services and utilities
+├── i18n/             # Translations
+└── styles/           # Themes and styling
+
+patches/              # Platform compatibility patches
+assets/               # Model files and images
+```
+
+## Permissions Required
+
+The app requires the following permissions:
+
+**iOS (Info.plist)**:
+- `NSCameraUsageDescription`: Camera access for real-time detection
+- `NSMicrophoneUsageDescription`: Microphone access for video recording
+- `NSPhotoLibraryUsageDescription`: Photo library access for saving images
+
+**Android (AndroidManifest.xml)**:
+- `CAMERA`: Camera access for detection
+- `RECORD_AUDIO`: Audio recording for videos
+- `READ_EXTERNAL_STORAGE` / `WRITE_EXTERNAL_STORAGE`: File storage access
+
+## Development Notes
+
+The app includes custom patches for:
+- **vision-camera-resize-plugin**: Maintains [0-255] float32 range for consistent model input
+- **react-native-fast-tflite**: Adds native YoloX postprocessing for both iOS and Android
+
+These patches are automatically applied via `patch-package` during `npm install`.

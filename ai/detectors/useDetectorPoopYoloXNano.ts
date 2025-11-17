@@ -5,9 +5,7 @@ import { COCO_LABELS } from '../cocoLabels'
 import type { UseDetectorResult } from './types'
 import { createYoloXNanoDetector } from './yoloxNanoDetector'
 
-export function useDetectorYoloXNanoPoop(resizeFn: any): UseDetectorResult {
-  const useShitSpotterModel = true;
-
+export function useDetectorYoloXNanoPoop(resizeFn: any, useShitSpotterModel: boolean): UseDetectorResult {
   // Define model assets statically for require() to work
   const modelAsset = useShitSpotterModel
     ? require('../../assets/shitspotter-custom-v5-epoch_115_float32.tflite')
