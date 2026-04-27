@@ -1,0 +1,17 @@
+diff --git a/node_modules/react-native-vision-camera-worklets/cpp/JSIConverter+AsyncQueue.hpp b/node_modules/react-native-vision-camera-worklets/cpp/JSIConverter+AsyncQueue.hpp
+index 5b93f23..4ba5b60 100644
+--- a/node_modules/react-native-vision-camera-worklets/cpp/JSIConverter+AsyncQueue.hpp
++++ b/node_modules/react-native-vision-camera-worklets/cpp/JSIConverter+AsyncQueue.hpp
+@@ -8,7 +8,11 @@
+ 
+ #include <NitroModules/JSIConverter.hpp>
+ #include <jsi/jsi.h>
+-#if __has_include(<worklets/RunLoop/AsyncQueue.h>)
++#if __has_include(<worklets/Public/AsyncQueue.h>)
++#include <worklets/Public/AsyncQueue.h>
++#elif __has_include(<RNWorklets/worklets/Public/AsyncQueue.h>)
++#include <RNWorklets/worklets/Public/AsyncQueue.h>
++#elif __has_include(<worklets/RunLoop/AsyncQueue.h>)
+ #include <worklets/RunLoop/AsyncQueue.h>
+ #elif __has_include(<RNWorklets/worklets/RunLoop/AsyncQueue.h>)
+ #include <RNWorklets/worklets/RunLoop/AsyncQueue.h>

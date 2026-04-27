@@ -53,6 +53,78 @@ npx expo run:android
 # web isn't supported
 ```
 
+## Building Release Versions
+
+To create standalone builds that don't require the Expo development server:
+
+### iOS Release Build
+
+#### Option 1: Development Build (Recommended)
+```bash
+# Build and install development build on device
+npx expo run:ios --device --configuration Release
+
+# Or build for specific device
+npx expo run:ios --device "Your Device Name" --configuration Release
+```
+
+#### Option 2: EAS Build (Cloud Build)
+```bash
+# Install EAS CLI
+npm install -g @expo/eas-cli
+
+# Login to Expo account
+eas login
+
+# Configure build
+eas build:configure
+
+# Build for iOS
+eas build --platform ios
+```
+
+### Android Release Build
+
+#### Option 1: Local APK Build
+```bash
+# Build release APK
+npx expo run:android --variant release
+
+# Or build AAB for Play Store
+cd android && ./gradlew bundleRelease
+```
+
+#### Option 2: EAS Build (Cloud Build)
+```bash
+# Build for Android
+eas build --platform android
+
+# Build both platforms
+eas build --platform all
+```
+
+### Build Configuration
+
+For production builds, consider updating `app.config.ts`:
+
+```typescript
+export default ({ config }: ConfigContext): ExpoConfig => ({
+  // ... existing config
+  extra: {
+    eas: {
+      projectId: "your-project-id"
+    }
+  }
+})
+```
+
+### Release Notes
+
+- **Development builds** include all native code and run independently
+- **EAS builds** are recommended for App Store/Play Store distribution  
+- **Local builds** are faster but require proper development environment setup
+- All builds include the necessary TensorFlow Lite models and patches
+
 ## Platform Support
 
 ### iOS

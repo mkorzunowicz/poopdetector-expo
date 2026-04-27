@@ -1,53 +1,52 @@
-import { CONTENT_SPACING, SAFE_AREA_PADDING } from '@/components/Constants'
-import { tr } from '@/i18n/i18n'
-import { useTheme } from '@/styles/ThemeContext'
-import { Ionicons } from '@expo/vector-icons'
-import { router } from 'expo-router'
-import React, { useCallback, useEffect, useState } from 'react'
-import { Linking, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
-import type { CameraPermissionStatus } from 'react-native-vision-camera'
-import { Camera } from 'react-native-vision-camera'
+import { CONTENT_SPACING, SAFE_AREA_PADDING } from "@/components/Constants";
+import { tr } from "@/i18n/i18n";
+import { useTheme } from "@/styles/ThemeContext";
+import { Ionicons } from "@expo/vector-icons";
+import { router } from "expo-router";
+import React, { useCallback, useEffect } from "react";
+import {
+    Linking,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
+} from "react-native";
+import {
+    useCameraPermission,
+    useMicrophonePermission,
+} from "react-native-vision-camera";
 
 const PermissionsPage: React.FC = () => {
-  const { theme } = useTheme()
-  const [cameraPermissionStatus, setCameraPermissionStatus] = useState<CameraPermissionStatus>('not-determined')
-  const [microphonePermissionStatus, setMicrophonePermissionStatus] = useState<CameraPermissionStatus>('not-determined')
+  const { theme } = useTheme();
+  const cameraPermission = useCameraPermission();
+  const microphonePermission = useMicrophonePermission();
+  const shouldOpenSettings =
+    cameraPermission.status === "denied" ||
+    cameraPermission.status === "restricted" ||
+    microphonePermission.status === "denied" ||
+    microphonePermission.status === "restricted";
 
   const requestMicrophonePermission = useCallback(async () => {
-    console.log('Requesting microphone permission...')
-    const permission = await Camera.requestMicrophonePermission()
-    console.log(`Microphone permission status: ${permission}`)
+    console.log("Requesting microphone permission...");
+    const granted = await microphonePermission.requestPermission();
+    console.log(`Microphone permission status: ${microphonePermission.status}`);
 
-    if (permission === 'denied') await Linking.openSettings()
-    setMicrophonePermissionStatus(permission)
-  }, [])
+    if (!granted) await Linking.openSettings();
+  }, [microphonePermission]);
 
   const requestCameraPermission = useCallback(async () => {
-    console.log('Requesting camera permission...')
-    const permission = await Camera.requestCameraPermission()
-    console.log(`Camera permission status: ${permission}`)
+    console.log("Requesting camera permission...");
+    const granted = await cameraPermission.requestPermission();
+    console.log(`Camera permission status: ${cameraPermission.status}`);
 
-    if (permission === 'denied') await Linking.openSettings()
-    setCameraPermissionStatus(permission)
-  }, [])
-
-  const checkPermissions = useCallback(async () => {
-    const cameraPermission = await Camera.getCameraPermissionStatus()
-    const microphonePermission = await Camera.getMicrophonePermissionStatus()
-    
-    setCameraPermissionStatus(cameraPermission)
-    setMicrophonePermissionStatus(microphonePermission)
-  }, [])
+    if (!granted) await Linking.openSettings();
+  }, [cameraPermission]);
 
   useEffect(() => {
-    checkPermissions()
-  }, [checkPermissions])
-
-  useEffect(() => {
-    if (cameraPermissionStatus === 'granted' && microphonePermissionStatus === 'granted') {
-      router.replace('/(tabs)')
+    if (cameraPermission.hasPermission && microphonePermission.hasPermission) {
+      router.replace("/(tabs)");
     }
-  }, [cameraPermissionStatus, microphonePermissionStatus])
+  }, [cameraPermission.hasPermission, microphonePermission.hasPermission]);
 
   const styles = StyleSheet.create({
     container: {
@@ -58,20 +57,20 @@ const PermissionsPage: React.FC = () => {
       paddingBottom: SAFE_AREA_PADDING.paddingBottom,
     },
     iconContainer: {
-      alignItems: 'center',
+      alignItems: "center",
       marginTop: 60,
       marginBottom: 30,
     },
     welcome: {
       fontSize: 28,
-      fontWeight: 'bold',
-      textAlign: 'center',
+      fontWeight: "bold",
+      textAlign: "center",
       marginBottom: 16,
       color: theme.colors.text,
     },
     description: {
       fontSize: 16,
-      textAlign: 'center',
+      textAlign: "center",
       color: theme.colors.textSecondary,
       marginBottom: 40,
       lineHeight: 22,
@@ -88,13 +87,13 @@ const PermissionsPage: React.FC = () => {
       borderColor: theme.colors.border,
     },
     permissionHeader: {
-      flexDirection: 'row',
-      alignItems: 'center',
+      flexDirection: "row",
+      alignItems: "center",
       marginBottom: 12,
     },
     permissionTitle: {
       fontSize: 18,
-      fontWeight: '600',
+      fontWeight: "600",
       marginLeft: 12,
       color: theme.colors.text,
     },
@@ -103,20 +102,21 @@ const PermissionsPage: React.FC = () => {
       paddingVertical: 12,
       paddingHorizontal: 20,
       borderRadius: 8,
-      alignItems: 'center',
+      alignItems: "center",
     },
     buttonText: {
       color: theme.colors.white,
       fontSize: 16,
-      fontWeight: '600',
+      fontWeight: "600",
     },
     grantedText: {
       color: theme.colors.success,
       fontSize: 16,
-      fontWeight: '500',
+      fontWeight: "500",
     },
     settingsContainer: {
-      backgroundColor: theme.name === 'dark' ? 'rgba(255, 178, 77, 0.15)' : '#FFF3CD',
+      backgroundColor:
+        theme.name === "dark" ? "rgba(255, 178, 77, 0.15)" : "#FFF3CD",
       padding: 16,
       borderRadius: 8,
       borderWidth: 1,
@@ -125,7 +125,7 @@ const PermissionsPage: React.FC = () => {
     settingsText: {
       fontSize: 14,
       color: theme.colors.textSecondary,
-      textAlign: 'center',
+      textAlign: "center",
       marginBottom: 12,
     },
     settingsButton: {
@@ -133,73 +133,116 @@ const PermissionsPage: React.FC = () => {
       paddingVertical: 10,
       paddingHorizontal: 16,
       borderRadius: 6,
-      alignItems: 'center',
+      alignItems: "center",
     },
-  })
+  });
 
   return (
     <View style={styles.container}>
       <View style={styles.iconContainer}>
-        <Ionicons name="camera-outline" size={80} color={theme.colors.primary} />
+        <Ionicons
+          name="camera-outline"
+          size={80}
+          color={theme.colors.primary}
+        />
       </View>
-      
-      <Text style={styles.welcome}>{tr('Permissions.cameraPermissionRequired')}</Text>
-      <Text style={styles.description}>
-        {tr('Permissions.description')}
+
+      <Text style={styles.welcome}>
+        {tr("Permissions.cameraPermissionRequired")}
       </Text>
-      
+      <Text style={styles.description}>{tr("Permissions.description")}</Text>
+
       <View style={styles.permissionsContainer}>
         <View style={styles.permissionItem}>
           <View style={styles.permissionHeader}>
-            <Ionicons 
-              name={cameraPermissionStatus === 'granted' ? 'checkmark-circle' : 'camera-outline'} 
-              size={24} 
-              color={cameraPermissionStatus === 'granted' ? theme.colors.success : theme.colors.primary} 
+            <Ionicons
+              name={
+                cameraPermission.hasPermission
+                  ? "checkmark-circle"
+                  : "camera-outline"
+              }
+              size={24}
+              color={
+                cameraPermission.hasPermission
+                  ? theme.colors.success
+                  : theme.colors.primary
+              }
             />
-            <Text style={styles.permissionTitle}>{tr('Permissions.cameraAccess')}</Text>
+            <Text style={styles.permissionTitle}>
+              {tr("Permissions.cameraAccess")}
+            </Text>
           </View>
-          {cameraPermissionStatus !== 'granted' && (
-            <TouchableOpacity style={styles.permissionButton} onPress={requestCameraPermission}>
-              <Text style={styles.buttonText}>{tr('Permissions.grantCamera')}</Text>
+          {!cameraPermission.hasPermission && (
+            <TouchableOpacity
+              style={styles.permissionButton}
+              onPress={requestCameraPermission}
+            >
+              <Text style={styles.buttonText}>
+                {tr("Permissions.grantCamera")}
+              </Text>
             </TouchableOpacity>
           )}
-          {cameraPermissionStatus === 'granted' && (
-            <Text style={styles.grantedText}>{tr('Permissions.cameraGranted')}</Text>
+          {cameraPermission.hasPermission && (
+            <Text style={styles.grantedText}>
+              {tr("Permissions.cameraGranted")}
+            </Text>
           )}
         </View>
 
         <View style={styles.permissionItem}>
           <View style={styles.permissionHeader}>
-            <Ionicons 
-              name={microphonePermissionStatus === 'granted' ? 'checkmark-circle' : 'mic-outline'} 
-              size={24} 
-              color={microphonePermissionStatus === 'granted' ? theme.colors.success : theme.colors.primary} 
+            <Ionicons
+              name={
+                microphonePermission.hasPermission
+                  ? "checkmark-circle"
+                  : "mic-outline"
+              }
+              size={24}
+              color={
+                microphonePermission.hasPermission
+                  ? theme.colors.success
+                  : theme.colors.primary
+              }
             />
-            <Text style={styles.permissionTitle}>{tr('Permissions.microphoneAccess')}</Text>
+            <Text style={styles.permissionTitle}>
+              {tr("Permissions.microphoneAccess")}
+            </Text>
           </View>
-          {microphonePermissionStatus !== 'granted' && (
-            <TouchableOpacity style={styles.permissionButton} onPress={requestMicrophonePermission}>
-              <Text style={styles.buttonText}>{tr('Permissions.grantMicrophone')}</Text>
+          {!microphonePermission.hasPermission && (
+            <TouchableOpacity
+              style={styles.permissionButton}
+              onPress={requestMicrophonePermission}
+            >
+              <Text style={styles.buttonText}>
+                {tr("Permissions.grantMicrophone")}
+              </Text>
             </TouchableOpacity>
           )}
-          {microphonePermissionStatus === 'granted' && (
-            <Text style={styles.grantedText}>{tr('Permissions.microphoneGranted')}</Text>
+          {microphonePermission.hasPermission && (
+            <Text style={styles.grantedText}>
+              {tr("Permissions.microphoneGranted")}
+            </Text>
           )}
         </View>
       </View>
 
-      {(cameraPermissionStatus === 'denied' || microphonePermissionStatus === 'denied') && (
+      {shouldOpenSettings ? (
         <View style={styles.settingsContainer}>
           <Text style={styles.settingsText}>
-            {tr('Permissions.deniedMessage')}
+            {tr("Permissions.deniedMessage")}
           </Text>
-          <TouchableOpacity style={styles.settingsButton} onPress={() => Linking.openSettings()}>
-            <Text style={styles.buttonText}>{tr('Permissions.openSettings')}</Text>
+          <TouchableOpacity
+            style={styles.settingsButton}
+            onPress={() => Linking.openSettings()}
+          >
+            <Text style={styles.buttonText}>
+              {tr("Permissions.openSettings")}
+            </Text>
           </TouchableOpacity>
         </View>
-      )}
+      ) : null}
     </View>
-  )
-}
+  );
+};
 
-export default PermissionsPage
+export default PermissionsPage;
