@@ -63,6 +63,7 @@ const CameraPage: React.FC = () => {
   const camera = useRef<CameraRef>(null);
   const recorder = useRef<Recorder | null>(null);
   const [isCameraConfigured, setIsCameraConfigured] = useState(false);
+  const [isCameraStarted, setIsCameraStarted] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const cameraPermission = useCameraPermission();
   const microphone = useMicrophonePermission();
@@ -91,8 +92,15 @@ const CameraPage: React.FC = () => {
       );
       setCameraError(null);
       setIsCameraConfigured(false);
+      setIsCameraStarted(false);
     }
   }, [isActive, cameraError]);
+
+  useEffect(() => {
+    if (!isActive) {
+      setIsCameraStarted(false);
+    }
+  }, [isActive]);
 
   // Check permissions and redirect if needed
   useEffect(() => {
@@ -142,6 +150,13 @@ const CameraPage: React.FC = () => {
   const lowLightBoostProps = canToggleNightMode
     ? { enableLowLightBoost: enableNightMode }
     : {};
+  const cameraControlProps =
+    isActive && isCameraConfigured && isCameraStarted
+      ? {
+          zoom,
+          exposure: 0,
+        }
+      : {};
   const minZoom = device?.minZoom ?? 1;
   const maxZoom = Math.min(device?.maxZoom ?? 1, MAX_ZOOM_FACTOR);
 
@@ -150,12 +165,23 @@ const CameraPage: React.FC = () => {
     console.error("[Camera] Error:", error);
     setCameraError(error.message);
     setIsCameraConfigured(false);
+    setIsCameraStarted(false);
   }, []);
 
   const onConfigured = useCallback(() => {
     console.log("[Camera] Session configured");
     setIsCameraConfigured(true);
     setCameraError(null); // Clear any previous errors
+  }, []);
+
+  const onStarted = useCallback(() => {
+    console.log("Camera started!");
+    setIsCameraStarted(true);
+  }, []);
+
+  const onStopped = useCallback(() => {
+    console.log("Camera stopped!");
+    setIsCameraStarted(false);
   }, []);
 
   const onMediaCaptured = useCallback(
@@ -438,6 +464,7 @@ const CameraPage: React.FC = () => {
                     isActive={isActive}
                     ref={camera}
                     {...lowLightBoostProps}
+                    {...cameraControlProps}
                     outputs={outputs}
                     constraints={constraints}
                     onConfigured={onConfigured}
@@ -447,13 +474,11 @@ const CameraPage: React.FC = () => {
                       );
                     }}
                     onError={onError}
-                    onStarted={() => console.log("Camera started!")}
-                    onStopped={() => console.log("Camera stopped!")}
+                    onStarted={onStarted}
+                    onStopped={onStopped}
                     onPreviewStarted={() => console.log("Preview started!")}
                     onPreviewStopped={() => console.log("Preview stopped!")}
                     enableNativeZoomGesture={false}
-                    zoom={zoom}
-                    exposure={0}
                   />
                 </View>
               </TapGestureHandler>
