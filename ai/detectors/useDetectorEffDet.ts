@@ -8,6 +8,7 @@ import { type UseDetectorResult } from "./types";
 export function useDetectorEffDet(resizeFn: any): UseDetectorResult {
   const modelHook = useTensorflowModel(
     require("../../assets/efficientdet_f32.tflite"),
+    [],
 
     // Platform.OS === 'ios' ? 'core-ml' : 'android-gpu'
   );

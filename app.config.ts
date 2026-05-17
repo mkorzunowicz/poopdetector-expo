@@ -1,5 +1,42 @@
 import { ConfigContext, ExpoConfig } from "expo/config";
 
+const variants = {
+  development: {
+    appName: "Poop Detector Dev",
+    androidPackage: "com.ugs.poopdetector.dev",
+    iosBundleIdentifier: "com.ugs.poopdetector.dev",
+    scheme: "poop-detector-dev",
+  },
+  preview: {
+    appName: "Poop Detector Preview",
+    androidPackage: "com.ugs.poopdetector.preview",
+    iosBundleIdentifier: "com.ugs.poopdetector.preview",
+    scheme: "poop-detector-preview",
+  },
+  production: {
+    appName: "Poop Detector",
+    androidPackage: "com.ugs.poopdetector",
+    iosBundleIdentifier: "com.ugs.poopdetector",
+    scheme: "poop-detector",
+  },
+} as const;
+
+type AppVariant = keyof typeof variants;
+
+const getAppVariant = (): AppVariant => {
+  const variant = process.env.EAS_BUILD_PROFILE ?? process.env.APP_VARIANT;
+
+  if (
+    variant === "development" ||
+    variant === "preview" ||
+    variant === "production"
+  ) {
+    return variant;
+  }
+
+  return "production";
+};
+
 type VisionCameraPluginProps = {
   cameraPermissionText?: string;
   microphonePermissionText?: string;
@@ -38,23 +75,26 @@ function withVisionCamera(
   return config;
 }
 
-export default ({ config }: ConfigContext): ExpoConfig =>
-  withVisionCamera(
+export default ({ config }: ConfigContext): ExpoConfig => {
+  const variant = getAppVariant();
+  const variantConfig = variants[variant];
+
+  return withVisionCamera(
     {
       ...config,
-      name: "Poop Detector",
+      name: variantConfig.appName,
       slug: "poop-detector",
       version: "1.0.0",
       orientation: "portrait",
       icon: "./assets/images/icon2.png",
-      scheme: "poop-detector",
+      scheme: variantConfig.scheme,
       userInterfaceStyle: "automatic",
       owner: "ugs",
-      newArchEnabled: true,
       ios: {
         supportsTablet: true,
-        bundleIdentifier: "com.ugs.poopdetector",
+        bundleIdentifier: variantConfig.iosBundleIdentifier,
         infoPlist: {
+          ITSAppUsesNonExemptEncryption: false,
           NSCameraUsageDescription:
             "This app needs access to your camera to take photos for poop detection.",
           NSMicrophoneUsageDescription:
@@ -70,7 +110,7 @@ export default ({ config }: ConfigContext): ExpoConfig =>
         adaptiveIcon: {
           foregroundImage: "./assets/images/icon2.png",
         },
-        package: "com.ugs.poopdetector",
+        package: variantConfig.androidPackage,
         permissions: [
           "android.permission.CAMERA",
           "android.permission.READ_EXTERNAL_STORAGE",
@@ -135,13 +175,19 @@ export default ({ config }: ConfigContext): ExpoConfig =>
             enableAndroidGpuLibraries: true,
           },
         ],
+        "expo-font",
+        "expo-image",
+        "expo-web-browser",
       ],
       experiments: {
         typedRoutes: true,
       },
       extra: {
         router: {},
-        scheme: "poop-detector",
+        eas: {
+          projectId: "42b92d8b-58d5-4f3b-a00f-38e8cbe9717e",
+        },
+        scheme: variantConfig.scheme,
       },
     },
     {
@@ -153,3 +199,4 @@ export default ({ config }: ConfigContext): ExpoConfig =>
       enableFrameProcessors: true,
     },
   );
+};

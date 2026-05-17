@@ -28,10 +28,37 @@ export function tensorToString(tensor: Tensor): string {
   "worklet";
   return `\n  - ${tensor.dataType} ${tensor.name}[${tensor.shape}]`;
 }
+
+export function toExactArrayBuffer(
+  value: ArrayBuffer | ArrayBufferView,
+): ArrayBuffer {
+  "worklet";
+
+  if (!ArrayBuffer.isView(value)) {
+    return value;
+  }
+
+  const { buffer, byteOffset, byteLength } = value;
+  if (
+    buffer instanceof ArrayBuffer &&
+    byteOffset === 0 &&
+    byteLength === buffer.byteLength
+  ) {
+    return buffer;
+  }
+
+  const bytes = new Uint8Array(byteLength);
+  bytes.set(new Uint8Array(buffer, byteOffset, byteLength));
+  return bytes.buffer;
+}
+
 export function modelToString(model: TensorflowModel): string {
   "worklet";
+  const delegates =
+    model.delegates.length > 0 ? model.delegates.join(", ") : "cpu";
+
   return (
-    `TFLite Model (${model.delegate}):\n` +
+    `TFLite Model (${delegates}):\n` +
     `- Inputs: ${model.inputs.map(tensorToString).join("")}\n` +
     `- Outputs: ${model.outputs.map(tensorToString).join("")}`
   );

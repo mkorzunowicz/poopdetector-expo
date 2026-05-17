@@ -37,10 +37,10 @@ export function useDetectorYoloXNanoPoop(
 
   const gpuModelHook = useTensorflowModel(
     modelAsset,
-    Platform.OS === "ios" ? "core-ml" : "android-gpu",
+    Platform.OS === "ios" ? ["core-ml"] : ["android-gpu"],
   );
 
-  const cpuModelHook = useTensorflowModel(modelAsset);
+  const cpuModelHook = useTensorflowModel(modelAsset, []);
 
   // Check if GPU failed and trigger CPU fallback
   useEffect(() => {

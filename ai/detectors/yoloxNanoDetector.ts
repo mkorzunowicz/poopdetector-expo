@@ -1,7 +1,7 @@
 "use worklet";
 
 import { Frame } from "react-native-vision-camera";
-import { Detection, modelToString } from "./types";
+import { Detection, modelToString, toExactArrayBuffer } from "./types";
 
 /* ───────────────────── private helpers ──────────────────────── */
 
@@ -326,42 +326,16 @@ export function createYoloXNanoDetector(
     // console.log(`[YoloX] Input: float32[0,255] from native, sample: ${inputData[0]}`)
 
     /* 2) inference + postprocessing -------------------------------------- */
-    // Try native postprocessing via modified TFLite plugin
-    let detections: Detection[];
-    try {
-      // Convert grid to flat format for native processing
-      const gridFlat = _gridToFlat(grid);
-
-      // Run inference with native YoloX postprocessing
-      const out = model.runSync([inputData], {
-        yoloxPostprocess: true,
-        gridData: gridFlat,
-        numClasses,
-        netSize: inSize,
-        confThreshold: confThr,
-        nmsThreshold: nmsThr,
-        skipNMS: false,
-      }) as Detection[];
-
-      detections = out;
-      // console.log('[YoloX] Native postprocessing succeeded');
-    } catch (error) {
-      console.log(
-        "[YoloX] Native postprocessing failed, using JS fallback:",
-        error,
-      );
-      // Fallback to JS postprocessing
-      const out = model.runSync([inputData]);
-      const tensor = out[0] as Float32Array;
-      detections = _postprocess(
-        tensor,
-        grid,
-        inSize,
-        numClasses,
-        confThr,
-        nmsThr,
-      );
-    }
+    const out = model.runSync([toExactArrayBuffer(inputData)]);
+    const tensor = new Float32Array(out[0]!);
+    const detections = _postprocess(
+      tensor,
+      grid,
+      inSize,
+      numClasses,
+      confThr,
+      nmsThr,
+    );
     const t3 = Date.now();
 
     const t4 = Date.now();

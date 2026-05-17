@@ -3,6 +3,8 @@
 
 import type { CameraOrientation, Frame } from "react-native-vision-camera";
 
+import { toExactArrayBuffer } from "./types";
+
 /* ─────────────────── shared helpers ─────────────────── */
 
 function toDeg(o: CameraOrientation): 0 | 90 | 180 | 270 {
@@ -56,9 +58,9 @@ export function createSamEncoder(
     });
 
     /* run encoder -------------------------------------------------- */
-    const out = model.runSync([inp]);
+    const out = model.runSync([toExactArrayBuffer(inp)]);
     // encoder has exactly one output
-    return out[0] as Float32Array; // length = 64*64*256 = 1 048 576
+    return new Float32Array(out[0]!); // length = 64*64*256 = 1,048,576
   };
 }
 
@@ -90,10 +92,14 @@ export function createSamDecoder(
     const ptCoords = new Float32Array([pointX, pointY, 0, 0]); // padded to 2×2
     const ptLabels = new Float32Array([pointLabel, 0]);
 
-    const out = model.runSync([embeddings, ptCoords, ptLabels]);
+    const out = model.runSync([
+      toExactArrayBuffer(embeddings),
+      toExactArrayBuffer(ptCoords),
+      toExactArrayBuffer(ptLabels),
+    ]);
 
-    let mask = out[0] as Float32Array; // len 256*256
-    const score = (out[1] as Float32Array)[0];
+    let mask = new Float32Array(out[0]!); // len 256*256
+    const score = new Float32Array(out[1]!)[0];
 
     /* optional threshold → binary mask ---------------------------- */
     if (maskThreshold > 0) {

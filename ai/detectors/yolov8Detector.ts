@@ -3,7 +3,7 @@
 
 import type { CameraOrientation, Frame } from "react-native-vision-camera";
 import { COCO_COLORS, COCO_LABELS } from "../cocoLabels"; // adjust the path as needed
-import { Detection, modelToString } from "./types";
+import { Detection, modelToString, toExactArrayBuffer } from "./types";
 
 /* ── public types ─────────────────────────────────────────────── */
 
@@ -89,7 +89,7 @@ export function createYolov8Detector(
     });
 
     /* 2 – inference ---------------------------------------------- */
-    const tens = model.runSync([inp])[0] as Float32Array; // len 705 600
+    const tens = new Float32Array(model.runSync([toExactArrayBuffer(inp)])[0]!); // len 705600
     if (tens.length !== LEN) {
       console.warn("[YOLOv8] unexpected tensor length", tens.length);
       return [];
