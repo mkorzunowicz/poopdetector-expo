@@ -73,6 +73,17 @@ function _iou(a: Detection, b: Detection): number {
   return interArea / unionArea;
 }
 
+function _flipXY(box: Detection): Detection {
+  "worklet";
+  return {
+    ...box,
+    x1: 1 - box.x2,
+    x2: 1 - box.x1,
+    y1: 1 - box.y2,
+    y2: 1 - box.y1,
+  };
+}
+
 function _getGrid(w: number, h: number): GridCoordinate[] {
   "worklet";
   const key = w * 10000 + h;
@@ -343,6 +354,6 @@ export function createYoloXNanoDetector(
     // // Add debug logging
     // console.log(`[YoloXNano] Total detection time: ${t4 - t0}ms, resize: ${t2-t0}ms, inference: ${t3 - t2}ms, postproc: ${t4 - t3}ms, in[${frame.width}x${frame.height}] -> [${inSize}x${inSize}]`)
 
-    return detections;
+    return detections.map(_flipXY);
   };
 }
