@@ -90,6 +90,12 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       scheme: variantConfig.scheme,
       userInterfaceStyle: "automatic",
       owner: "ugs",
+      updates: {
+        url: "https://u.expo.dev/42b92d8b-58d5-4f3b-a00f-38e8cbe9717e",
+      },
+      runtimeVersion: {
+        policy: "appVersion",
+      },
       ios: {
         supportsTablet: true,
         bundleIdentifier: variantConfig.iosBundleIdentifier,
