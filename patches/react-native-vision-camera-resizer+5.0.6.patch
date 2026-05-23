@@ -1,0 +1,25 @@
+diff --git a/node_modules/react-native-vision-camera-resizer/android/src/main/shaders/Resizer.comp b/node_modules/react-native-vision-camera-resizer/android/src/main/shaders/Resizer.comp
+index 733f94c..122a8cc 100644
+--- a/node_modules/react-native-vision-camera-resizer/android/src/main/shaders/Resizer.comp
++++ b/node_modules/react-native-vision-camera-resizer/android/src/main/shaders/Resizer.comp
+@@ -226,7 +226,7 @@ void writeOutputColor(uvec2 gid, vec3 ordered) {
+       writeFloat16Color(gid, ordered);
+       return;
+     case 3u: // 3u == DataType::FLOAT32
+-      writeFloat32Color(gid, ordered);
++      writeFloat32Color(gid, ordered * 255.0);
+       return;
+     default:
+       // Unsupported DataType specialization. Return without writing so the valid path stays simple.
+diff --git a/node_modules/react-native-vision-camera-resizer/ios/Metal/ResizerKernels.metal b/node_modules/react-native-vision-camera-resizer/ios/Metal/ResizerKernels.metal
+index 79106ed..1107dc4 100644
+--- a/node_modules/react-native-vision-camera-resizer/ios/Metal/ResizerKernels.metal
++++ b/node_modules/react-native-vision-camera-resizer/ios/Metal/ResizerKernels.metal
+@@ -214,6 +214,6 @@ kernel void resize_float32(
+ 
+   for (uint channelIndex = 0u; channelIndex < kChannelCount; channelIndex++) {
+     uint index = outputIndex(gid, channelIndex, uniforms);
+-    output[index] = ordered[channelIndex];
++    output[index] = ordered[channelIndex] * 255.0f;
+   }
+ }

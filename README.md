@@ -17,6 +17,7 @@ The app uses pre-trained YoloX models from the [tflite_models repository](https:
 Put the models into **./assets** directory. Remote download should be supported by the tflite library, but it didn't work yet. I'll see if I can get an alternative way to work.
 
 Currently hardcoded:
+
 - **YoloX Nano Poop**: YoloX Nano 416 old model dated 2024
 - **ShitSpotter v5**: Erotemic's YoloX recent 640 model
 
@@ -36,6 +37,7 @@ npm install
 ```
 
 This will automatically:
+
 - Install all React Native and Expo dependencies
 - Apply necessary patches for iOS/Android compatibility via `patch-package`
 - Set up TensorFlow Lite and camera plugins
@@ -43,6 +45,7 @@ This will automatically:
 ### Development Scripts
 
 #### Run on Specific Platforms
+
 ```bash
 # iOS
 npx expo run:ios
@@ -60,6 +63,7 @@ To create standalone builds that don't require the Expo development server:
 ### iOS Release Build
 
 #### Option 1: Development Build (Recommended)
+
 ```bash
 # Build and install development build on device
 npx expo run:ios --device --configuration Release
@@ -69,6 +73,7 @@ npx expo run:ios --device "Your Device Name" --configuration Release
 ```
 
 #### Option 2: EAS Build (Cloud Build)
+
 ```bash
 # Install EAS CLI
 npm install -g @expo/eas-cli
@@ -86,6 +91,7 @@ eas build --platform ios
 ### Android Release Build
 
 #### Option 1: Local APK Build
+
 ```bash
 # Build release APK
 npx expo run:android --variant release
@@ -95,6 +101,7 @@ cd android && ./gradlew bundleRelease
 ```
 
 #### Option 2: EAS Build (Cloud Build)
+
 ```bash
 # Build for Android
 eas build --platform android
@@ -112,40 +119,45 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   // ... existing config
   extra: {
     eas: {
-      projectId: "your-project-id"
-    }
-  }
-})
+      projectId: "your-project-id",
+    },
+  },
+});
 ```
 
 ### Release Notes
 
 - **Development builds** include all native code and run independently
-- **EAS builds** are recommended for App Store/Play Store distribution  
+- **EAS builds** are recommended for App Store/Play Store distribution
 - **Local builds** are faster but require proper development environment setup
 - All builds include the necessary TensorFlow Lite models and patches
 
 ## Platform Support
 
 ### iOS
+
 - Uses CoreML delegate for optimized inference
 - Native YoloX postprocessing in C++
 
-### Android  
+### Android
+
 - Uses GPU delegate for accelerated inference, fallsback to CPU if not supported
 - Native YoloX postprocessing in C++
 
 ## Technical Features
 
 - **Worklet-based frame processing**: Ultra-fast camera frame processing using React Native Worklets
-- **Native TensorFlow Lite**: Custom patches for optimized model inference 
+- **Native TensorFlow Lite**: Custom patches for optimized model inference
 - **Adaptive frame rates**: Dynamic FPS adjustment based on performance
 
 ## Performance
 
-iOS (iPhone 15): detection takes 30ms (nano 416), 50ms shitspotter
+With vision v5 update we got:
+iOS (iPhone 15): detection takes 25ms (nano 416), 45ms shitspotter
 
-Android (Samsung S10): 100ms (nano 416), 300ms shitspotter
+Android (Samsung S10): 70ms (nano 416), 220ms shitspotter
+
+I tried Samsung S9+ but here it complained about Vulkan 1.1 compatible device being not found.
 
 ## Architecture
 
@@ -154,7 +166,7 @@ app/
 ├── (tabs)/           # Tab navigation screens
 ├── ai/
 │   ├── detectors/    # YoloX detection implementations
-├── components/       # Reusable UI components  
+├── components/       # Reusable UI components
 ├── hooks/            # Custom React hooks
 ├── services/         # App services and utilities
 ├── i18n/             # Translations
@@ -167,7 +179,8 @@ assets/               # Model files and images
 ## Development Notes
 
 The app includes custom patches for:
-- **vision-camera-resize-plugin**: Maintains [0-255] float32 range for consistent model input
-- **react-native-fast-tflite**: Adds native YoloX postprocessing for both iOS and Android
+
+- **react-native-vision-camera-resizer**: Keeps float32 resize output in the native [0-255] range for the poop detector models. Upstream v5 returns normalized [0-1] float32 values; this patch restores the previous unnormalized behavior and reduced Android detection time from roughly 260ms back to about 50-80ms.
+- **react-native-vision-camera-worklets** and **react-native-worklets**: Compatibility fixes for the current Expo/React Native/iOS header setup.
 
 These patches are automatically applied via `patch-package` during `npm install`.

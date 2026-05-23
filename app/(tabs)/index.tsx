@@ -262,6 +262,9 @@ const CameraPage: React.FC = () => {
   const lastDetectionStartedAtRef = useMemo(() => createSynchronizable(0), []);
   const detectionTimesRef = useRef<number[]>([]);
   const [detectionFpsHistory, setDetectionFpsHistory] = useState<number[]>([]);
+  const [lastDetectionTimeMs, setLastDetectionTimeMs] = useState<number | null>(
+    null,
+  );
 
   // Clear detections when camera becomes inactive
   useEffect(() => {
@@ -272,6 +275,7 @@ const CameraPage: React.FC = () => {
       setDetections([]);
       detectionTimesRef.current = [];
       setDetectionFpsHistory([]);
+      setLastDetectionTimeMs(null);
       lastDetectionStartedAtRef.setBlocking(0);
       return;
     }
@@ -279,6 +283,7 @@ const CameraPage: React.FC = () => {
     console.log("[Camera] Camera active - resuming processing");
     detectionTimesRef.current = [];
     setDetectionFpsHistory([]);
+    setLastDetectionTimeMs(null);
     setAdaptiveTargetFps(3);
     adaptiveTargetFpsRef.setBlocking(3);
     lastDetectionStartedAtRef.setBlocking(0);
@@ -291,6 +296,7 @@ const CameraPage: React.FC = () => {
   const onDetectionCompleted = useCallback(
     (nextDetections: Detection[], detectionTimeMs: number) => {
       setDetections(nextDetections);
+      setLastDetectionTimeMs(detectionTimeMs);
 
       detectionTimesRef.current.push(detectionTimeMs);
       if (detectionTimesRef.current.length > 5) {
@@ -558,7 +564,14 @@ const CameraPage: React.FC = () => {
               );
             })}
           </View>
-          <Text style={styles.detectionFpsText}>{adaptiveTargetFps} FPS</Text>
+          <View style={styles.detectionStatsText}>
+            {lastDetectionTimeMs != null && (
+              <Text style={styles.detectionTimeText}>
+                {lastDetectionTimeMs} ms
+              </Text>
+            )}
+            <Text style={styles.detectionFpsText}>{adaptiveTargetFps} FPS</Text>
+          </View>
         </View>
       )}
 
@@ -719,15 +732,22 @@ const styles = StyleSheet.create({
     left: 0,
     flexDirection: "row",
     alignItems: "flex-end",
-    height: 40,
+    height: 52,
     paddingLeft: 0,
     paddingRight: 8,
     paddingVertical: 2,
   },
-  detectionFpsText: {
+  detectionStatsText: {
     position: "absolute",
     left: 8,
-    top: 8,
+    top: 2,
+  },
+  detectionTimeText: {
+    color: "white",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  detectionFpsText: {
     color: "white",
     fontSize: 14,
     fontWeight: "bold",

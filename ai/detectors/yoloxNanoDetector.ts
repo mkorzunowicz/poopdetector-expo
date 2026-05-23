@@ -327,9 +327,6 @@ export function createYoloXNanoDetector(
     } else {
       const resizedFrame = resizer.resize(frame);
       inputData = new Float32Array(resizedFrame.getPixelBuffer());
-      for (let index = 0; index < inputData.length; index += 1) {
-        inputData[index] *= 255;
-      }
       resizedFrame.dispose();
     }
 
