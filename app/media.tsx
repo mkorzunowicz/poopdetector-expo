@@ -1,83 +1,630 @@
-import { SAFE_AREA_PADDING } from '@/components/Constants'
-import { tr } from '@/i18n/i18n'
-import { useTheme } from '@/styles/ThemeContext'
-import { Ionicons } from '@expo/vector-icons'
-import { useFocusEffect } from '@react-navigation/core'
-import * as MediaLibrary from 'expo-media-library'
-import { router, useLocalSearchParams } from 'expo-router'
-import React, { useCallback, useMemo, useState } from 'react'
-import type { ImageLoadEventData, NativeSyntheticEvent } from 'react-native'
-import { ActivityIndicator, Alert, Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
+import { modelToString, type Detection } from "@/ai/detectors/types";
+import {
+    decodeSamMask,
+    detectPoopInPhoto,
+    encodePhotoForSam,
+    getInitialSamPoint,
+    loadPhotoImage,
+    toFileUri,
+    type SamEmbeddings,
+    type SamPoint,
+} from "@/ai/mobileSamPhoto";
+import { SAFE_AREA_PADDING } from "@/components/Constants";
+import { tr } from "@/i18n/i18n";
+import {
+    attachPhotoSegmentationAssetId,
+    getPhotoSegmentation,
+    savePhotoSegmentation,
+} from "@/services/photoSegmentationStore";
+import { useTheme } from "@/styles/ThemeContext";
+import { Ionicons } from "@expo/vector-icons";
+import { useFocusEffect } from "@react-navigation/core";
+// expo-image honors the JPEG EXIF orientation flag (which RN core <Image>
+// ignores here, rendering camera photos sideways), so the displayed frame
+// matches the upright orientation Nitro decodes for the encoder/mask.
+import { Image } from "expo-image";
+import * as MediaLibrary from "expo-media-library";
+import { router, useLocalSearchParams } from "expo-router";
+import React, {
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+} from "react";
+import type {
+    GestureResponderEvent,
+    LayoutChangeEvent,
+} from "react-native";
+import {
+    ActivityIndicator,
+    Alert,
+    Pressable,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
+} from "react-native";
+import { useTensorflowModel } from "react-native-fast-tflite";
+import Svg, { Circle, Polygon, Rect } from "react-native-svg";
 
-type OnLoadImage = NativeSyntheticEvent<ImageLoadEventData>
+const DETECTION_MODEL_ASSET = require("../assets/yolox_nano_poop_cropped_only_best_float32.tflite");
+const SAM_ENCODER_MODEL_ASSET = require("../assets/mobilesam-samencoder.tflite");
+const SAM_DECODER_MODEL_ASSET = require("../assets/mobilesam-samdecoder.tflite");
+
+function getContainedImageRect(
+  containerWidth: number,
+  containerHeight: number,
+  imageWidth: number,
+  imageHeight: number,
+): { x: number; y: number; width: number; height: number } | null {
+  if (
+    containerWidth <= 0 ||
+    containerHeight <= 0 ||
+    imageWidth <= 0 ||
+    imageHeight <= 0
+  ) {
+    return null;
+  }
+
+  const scale = Math.min(
+    containerWidth / imageWidth,
+    containerHeight / imageHeight,
+  );
+  const width = imageWidth * scale;
+  const height = imageHeight * scale;
+  return {
+    x: (containerWidth - width) / 2,
+    y: (containerHeight - height) / 2,
+    width,
+    height,
+  };
+}
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+function yieldToUi(): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, 0);
+  });
+}
+
+function logMediaSamUi(message: string, data?: Record<string, unknown>): void {
+  if (data) {
+    console.log(`[MediaSAM/UI] ${message}`, data);
+    return;
+  }
+  console.log(`[MediaSAM/UI] ${message}`);
+}
+
+function logMediaSamUiError(
+  message: string,
+  error: unknown,
+  data?: Record<string, unknown>,
+): void {
+  if (data) {
+    console.error(`[MediaSAM/UI] ${message}`, { ...data, error });
+    return;
+  }
+  console.error(`[MediaSAM/UI] ${message}`, error);
+}
 
 const MediaPage: React.FC = () => {
-  const { path, type } = useLocalSearchParams<{ path: string; type: 'photo' | 'video' }>()
-  const [hasMediaLoaded, setHasMediaLoaded] = useState(false)
-  const [isScreenFocused, setIsScreenFocused] = useState(false)
-  const [isSaving, setIsSaving] = useState(false)
-  const { theme } = useTheme()
+  const { path, type } = useLocalSearchParams<{
+    path: string;
+    type: "photo" | "video";
+  }>();
+  const [hasMediaLoaded, setHasMediaLoaded] = useState(false);
+  const [isScreenFocused, setIsScreenFocused] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isBootstrapping, setIsBootstrapping] = useState(false);
+  const [isDecoding, setIsDecoding] = useState(false);
+  const [photoSize, setPhotoSize] = useState({ width: 0, height: 0 });
+  const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
+  const [detections, setDetections] = useState<Detection[]>([]);
+  const [points, setPoints] = useState<SamPoint[]>([]);
+  const [pointMode, setPointMode] = useState<0 | 1>(1);
+  const [polygon, setPolygon] = useState<Array<{ x: number; y: number }>>([]);
+  const [maskData, setMaskData] = useState<{
+    binaryMask: Uint8Array;
+    maskWidth: number;
+    maskHeight: number;
+  } | null>(null);
+  const [maskScore, setMaskScore] = useState<number | null>(null);
+  const [statusText, setStatusText] = useState<string>("Loading models...");
+  const [errorText, setErrorText] = useState<string | null>(null);
+  const { theme } = useTheme();
+
+  const photoRef = useRef<Awaited<ReturnType<typeof loadPhotoImage>> | null>(
+    null,
+  );
+  const embeddingsRef = useRef<SamEmbeddings | null>(null);
+  const encoderContextRef = useRef<
+    Awaited<ReturnType<typeof encodePhotoForSam>>["context"] | null
+  >(null);
+  const detectionsRef = useRef<Detection[]>([]);
+  const hasBootstrappedRef = useRef(false);
+
+  const detectionModelHook = useTensorflowModel(DETECTION_MODEL_ASSET, []);
+  const samEncoderHook = useTensorflowModel(SAM_ENCODER_MODEL_ASSET, []);
+  const samDecoderHook = useTensorflowModel(SAM_DECODER_MODEL_ASSET, []);
+
+  const detectionModel =
+    detectionModelHook.state === "loaded" ? detectionModelHook.model : null;
+  const samEncoderModel =
+    samEncoderHook.state === "loaded" ? samEncoderHook.model : null;
+  const samDecoderModel =
+    samDecoderHook.state === "loaded" ? samDecoderHook.model : null;
+
+  useEffect(() => {
+    if (detectionModel) {
+      logMediaSamUi("Detection model ready", {
+        model: modelToString(detectionModel),
+      });
+    }
+  }, [detectionModel]);
+
+  useEffect(() => {
+    if (samEncoderModel) {
+      logMediaSamUi("SAM encoder model ready", {
+        model: modelToString(samEncoderModel),
+      });
+    }
+  }, [samEncoderModel]);
+
+  useEffect(() => {
+    if (samDecoderModel) {
+      logMediaSamUi("SAM decoder model ready", {
+        model: modelToString(samDecoderModel),
+      });
+    }
+  }, [samDecoderModel]);
 
   useFocusEffect(
     useCallback(() => {
-      setIsScreenFocused(true)
+      setIsScreenFocused(true);
       return () => {
-        setIsScreenFocused(false)
+        setIsScreenFocused(false);
+      };
+    }, []),
+  );
+
+  useEffect(() => {
+    hasBootstrappedRef.current = false;
+    photoRef.current = null;
+    embeddingsRef.current = null;
+    encoderContextRef.current = null;
+    setHasMediaLoaded(false);
+    setIsBootstrapping(false);
+    setIsDecoding(false);
+    setPhotoSize({ width: 0, height: 0 });
+    setContainerSize({ width: 0, height: 0 });
+    setDetections([]);
+    setPoints([]);
+    setPolygon([]);
+    setMaskData(null);
+    setMaskScore(null);
+    setStatusText("Loading models...");
+    setErrorText(null);
+  }, [path, type]);
+
+  const source = useMemo(() => ({ uri: toFileUri(path ?? "") }), [path]);
+  const imageRect = useMemo(
+    () =>
+      getContainedImageRect(
+        containerSize.width,
+        containerSize.height,
+        photoSize.width,
+        photoSize.height,
+      ),
+    [
+      containerSize.height,
+      containerSize.width,
+      photoSize.height,
+      photoSize.width,
+    ],
+  );
+  const modelError =
+    detectionModelHook.state === "error"
+      ? "Failed to load poop detection model."
+      : samEncoderHook.state === "error"
+        ? "Failed to load MobileSAM encoder model."
+        : samDecoderHook.state === "error"
+          ? "Failed to load MobileSAM decoder model."
+          : null;
+
+  useEffect(() => {
+    if (modelError != null) {
+      setErrorText(modelError);
+      setStatusText(modelError);
+    }
+  }, [modelError]);
+
+  useEffect(() => {
+    detectionsRef.current = detections;
+  }, [detections]);
+
+  const persistSegmentation = useCallback(
+    async (
+      nextPoints: SamPoint[],
+      nextPolygon: Array<{ x: number; y: number }>,
+      nextScore: number,
+      nextDetections: Detection[],
+    ) => {
+      const photo = photoRef.current;
+      if (!photo) {
+        return;
       }
-    }, [])
-  )
 
-  const onMediaLoad = useCallback((event: OnLoadImage) => {
-    const source = event.nativeEvent.source
-    console.log(`Image loaded. Size: ${source.width}x${source.height}`)
-  }, [])
-  
+      await savePhotoSegmentation({
+        photoPath: photo.filePath,
+        updatedAt: Date.now(),
+        imageWidth: photo.width,
+        imageHeight: photo.height,
+        score: nextScore,
+        points: nextPoints,
+        polygon: nextPolygon,
+        detections: nextDetections,
+      });
+    },
+    [],
+  );
+
+  const runSegmentation = useCallback(
+    async (nextPoints: SamPoint[]) => {
+      if (
+        !samDecoderModel ||
+        !embeddingsRef.current ||
+        !encoderContextRef.current
+      ) {
+        logMediaSamUi("runSegmentation skipped", {
+          hasDecoderModel: samDecoderModel != null,
+          hasEmbeddings: embeddingsRef.current != null,
+          hasEncoderContext: encoderContextRef.current != null,
+        });
+        return;
+      }
+
+      const startTime = Date.now();
+      setIsDecoding(true);
+      setErrorText(null);
+
+      try {
+        logMediaSamUi("runSegmentation begin", {
+          pointCount: nextPoints.length,
+          points: nextPoints,
+        });
+
+        if (nextPoints.length === 0) {
+          setPolygon([]);
+          setMaskData(null);
+          setMaskScore(null);
+          setStatusText("Mask cleared.");
+          await persistSegmentation([], [], 0, detectionsRef.current);
+          logMediaSamUi("runSegmentation cleared mask", {
+            elapsedMs: Date.now() - startTime,
+          });
+          return;
+        }
+
+        setStatusText("Decoding MobileSAM mask...");
+        await yieldToUi();
+        const result = await decodeSamMask(
+          samDecoderModel,
+          embeddingsRef.current,
+          encoderContextRef.current,
+          nextPoints,
+        );
+        setMaskData({
+          binaryMask: result.binaryMask,
+          maskWidth: result.maskWidth,
+          maskHeight: result.maskHeight,
+        });
+        setPolygon(result.polygon);
+        setMaskScore(result.score);
+        setStatusText(
+          result.polygon.length > 2
+            ? `Mask updated (${Math.round(result.score * 100)}% confidence)`
+            : "Mask updated.",
+        );
+        await persistSegmentation(
+          nextPoints,
+          result.polygon,
+          result.score,
+          detectionsRef.current,
+        );
+        logMediaSamUi("runSegmentation complete", {
+          elapsedMs: Date.now() - startTime,
+          score: result.score,
+          polygonPoints: result.polygon.length,
+        });
+      } catch (error) {
+        logMediaSamUiError("runSegmentation failed", error, {
+          elapsedMs: Date.now() - startTime,
+          pointCount: nextPoints.length,
+        });
+        setErrorText("Failed to decode MobileSAM mask.");
+      } finally {
+        setIsDecoding(false);
+      }
+    },
+    [persistSegmentation, samDecoderModel],
+  );
+
+  useEffect(() => {
+    if (
+      type !== "photo" ||
+      !path ||
+      !hasMediaLoaded ||
+      !isScreenFocused ||
+      !detectionModel ||
+      !samEncoderModel ||
+      !samDecoderModel ||
+      hasBootstrappedRef.current
+    ) {
+      return;
+    }
+
+    hasBootstrappedRef.current = true;
+    let isCancelled = false;
+
+    const bootstrap = async () => {
+      const startTime = Date.now();
+      setIsBootstrapping(true);
+      setErrorText(null);
+
+      try {
+        logMediaSamUi("bootstrap begin", { path, type });
+        setStatusText("Loading photo...");
+        const photo = await loadPhotoImage(path);
+        if (isCancelled) return;
+
+        photoRef.current = photo;
+        setPhotoSize({ width: photo.width, height: photo.height });
+
+        setStatusText("Detecting poop...");
+        const nextDetections = detectPoopInPhoto(detectionModel, photo.image);
+        if (isCancelled) return;
+        setDetections(nextDetections);
+        logMediaSamUi("Photo detection complete", {
+          detectionCount: nextDetections.length,
+          detections: nextDetections,
+          elapsedMs: Date.now() - startTime,
+        });
+
+        setStatusText("Encoding MobileSAM...");
+        await yieldToUi();
+        const { embeddings, context } = await encodePhotoForSam(
+          samEncoderModel,
+          photo.image,
+          async (message) => {
+            setStatusText(message);
+            await yieldToUi();
+          },
+        );
+        if (isCancelled) return;
+        embeddingsRef.current = embeddings;
+        encoderContextRef.current = context;
+        logMediaSamUi("SAM encoder complete", {
+          elapsedMs: Date.now() - startTime,
+          embeddingBytes: embeddings.byteLength,
+          context,
+        });
+
+        setStatusText("Loading saved segmentation...");
+        await yieldToUi();
+        const savedSegmentation = await getPhotoSegmentation(photo.filePath);
+        if (isCancelled) return;
+        logMediaSamUi("Saved segmentation loaded", {
+          elapsedMs: Date.now() - startTime,
+          found: savedSegmentation != null,
+          pointCount: savedSegmentation?.points.length ?? 0,
+          polygonPoints: savedSegmentation?.polygon.length ?? 0,
+        });
+
+        const seededPoints = savedSegmentation?.points.length
+          ? savedSegmentation.points
+          : [getInitialSamPoint(nextDetections)];
+
+        setPoints(seededPoints);
+        setStatusText("Decoding initial MobileSAM mask...");
+        await yieldToUi();
+        await runSegmentation(seededPoints);
+        logMediaSamUi("bootstrap complete", {
+          elapsedMs: Date.now() - startTime,
+          seededPointCount: seededPoints.length,
+        });
+      } catch (error) {
+        logMediaSamUiError("bootstrap failed", error, {
+          elapsedMs: Date.now() - startTime,
+          path,
+          type,
+        });
+        const message =
+          error instanceof Error
+            ? `Failed to prepare photo segmentation: ${error.message}`
+            : "Failed to prepare photo segmentation.";
+        setErrorText(message);
+        setStatusText(message);
+      } finally {
+        if (!isCancelled) {
+          setIsBootstrapping(false);
+        }
+      }
+    };
+
+    void bootstrap();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [
+    detectionModel,
+    hasMediaLoaded,
+    isScreenFocused,
+    path,
+    runSegmentation,
+    samDecoderModel,
+    samEncoderModel,
+    type,
+  ]);
+
   const onMediaLoadEnd = useCallback(() => {
-    console.log('media has loaded.')
-    setHasMediaLoaded(true)
-  }, [])
+    setHasMediaLoaded(true);
+  }, []);
 
-  const source = useMemo(() => ({ uri: `file://${path}` }), [path])
+  const onMediaLayout = useCallback((event: LayoutChangeEvent) => {
+    const { width, height } = event.nativeEvent.layout;
+    setContainerSize({ width, height });
+  }, []);
 
-  const screenStyle = useMemo(() => ({ opacity: hasMediaLoaded ? 1 : 0 }), [hasMediaLoaded])
+  const handleImagePress = useCallback(
+    (event: GestureResponderEvent) => {
+      if (!imageRect || isBootstrapping || isDecoding) {
+        return;
+      }
+
+      const localX = event.nativeEvent.locationX - imageRect.x;
+      const localY = event.nativeEvent.locationY - imageRect.y;
+      if (
+        localX < 0 ||
+        localY < 0 ||
+        localX > imageRect.width ||
+        localY > imageRect.height
+      ) {
+        return;
+      }
+
+      const nextPoint: SamPoint = {
+        x: clamp01(localX / imageRect.width),
+        y: clamp01(localY / imageRect.height),
+        label: pointMode,
+      };
+
+      const nextPoints = [...points, nextPoint];
+      setPoints(nextPoints);
+      void runSegmentation(nextPoints);
+    },
+    [
+      imageRect,
+      isBootstrapping,
+      isDecoding,
+      pointMode,
+      points,
+      runSegmentation,
+    ],
+  );
+
+  const handleClearPoints = useCallback(() => {
+    setPoints([]);
+    void runSegmentation([]);
+  }, [runSegmentation]);
 
   const handleSaveToGallery = useCallback(async () => {
-    if (!path || type !== 'photo') return
+    if (!path || type !== "photo") return;
 
     try {
-      setIsSaving(true)
-      
-      // Request permissions
-      const { status } = await MediaLibrary.requestPermissionsAsync()
-      if (status !== 'granted') {
+      setIsSaving(true);
+
+      const { status } = await MediaLibrary.requestPermissionsAsync();
+      if (status !== "granted") {
         Alert.alert(
-          tr('Media.permissionDenied'),
-          tr('Media.permissionNeeded'),
-          [{ text: tr('Global.ok') }]
-        )
-        return
+          tr("Media.permissionDenied"),
+          tr("Media.permissionNeeded"),
+          [{ text: tr("Global.ok") }],
+        );
+        return;
       }
 
-      // Save to gallery
-      const asset = await MediaLibrary.createAssetAsync(`file://${path}`)
-      await MediaLibrary.createAlbumAsync('Poop Detector', asset, false)
-      
-      Alert.alert(
-        tr('Global.success'),
-        tr('Media.saved'),
-        [{ text: tr('Global.ok') }]
-      )
+      const asset = await MediaLibrary.createAssetAsync(toFileUri(path));
+      const album = await MediaLibrary.getAlbumAsync("Poop Detector");
+      if (album) {
+        await MediaLibrary.addAssetsToAlbumAsync([asset], album, false);
+      } else {
+        await MediaLibrary.createAlbumAsync("Poop Detector", asset, false);
+      }
+      await attachPhotoSegmentationAssetId(path, asset.id);
+
+      Alert.alert(tr("Global.success"), tr("Media.saved"), [
+        { text: tr("Global.ok") },
+      ]);
     } catch (error) {
-      console.error('Error saving to gallery:', error)
-      Alert.alert(
-        tr('Global.error'),
-        tr('Media.saveFailed'),
-        [{ text: tr('Global.ok') }]
-      )
+      console.error("Error saving to gallery:", error);
+      Alert.alert(tr("Global.error"), tr("Media.saveFailed"), [
+        { text: tr("Global.ok") },
+      ]);
     } finally {
-      setIsSaving(false)
+      setIsSaving(false);
     }
-  }, [path, type])
+  }, [path, type]);
+
+  const polygonPoints = useMemo(() => {
+    if (
+      !imageRect ||
+      photoSize.width <= 0 ||
+      photoSize.height <= 0 ||
+      polygon.length < 3
+    ) {
+      return "";
+    }
+
+    return polygon
+      .map(
+        (point) =>
+          `${imageRect.x + (point.x / photoSize.width) * imageRect.width},${
+            imageRect.y + (point.y / photoSize.height) * imageRect.height
+          }`,
+      )
+      .join(" ");
+  }, [imageRect, photoSize.height, photoSize.width, polygon]);
+
+  const maskRuns = useMemo(() => {
+    if (!imageRect || !maskData) {
+      return [] as Array<{ x: number; y: number; width: number }>;
+    }
+
+    const runs: Array<{ x: number; y: number; width: number }> = [];
+    const { binaryMask, maskWidth, maskHeight } = maskData;
+
+    for (let y = 0; y < maskHeight; y += 1) {
+      let runStart = -1;
+
+      for (let x = 0; x < maskWidth; x += 1) {
+        const isFilled = binaryMask[y * maskWidth + x] === 1;
+
+        if (isFilled && runStart === -1) {
+          runStart = x;
+        }
+
+        const isRunEnd = runStart !== -1 && (!isFilled || x === maskWidth - 1);
+        if (!isRunEnd) {
+          continue;
+        }
+
+        const endX = isFilled && x === maskWidth - 1 ? x + 1 : x;
+        runs.push({
+          x: runStart,
+          y,
+          width: endX - runStart,
+        });
+        runStart = -1;
+      }
+    }
+
+    return runs;
+  }, [imageRect, maskData]);
+
+  const canInteract = type === "photo" && imageRect != null && !isBootstrapping;
+  const showLoader =
+    type === "photo" &&
+    modelError == null &&
+    (detectionModelHook.state !== "loaded" ||
+      samEncoderHook.state !== "loaded" ||
+      samDecoderHook.state !== "loaded" ||
+      isBootstrapping ||
+      isDecoding);
 
   if (!path || !type) {
     return (
@@ -85,79 +632,301 @@ const MediaPage: React.FC = () => {
         <TouchableOpacity style={styles.closeButton} onPress={router.back}>
           <Ionicons name="close" size={35} color="white" />
         </TouchableOpacity>
-        <Text style={{ color: 'white' }}>No media found</Text>
+        <Text style={styles.emptyText}>No media found</Text>
       </View>
-    )
+    );
   }
 
   return (
-    <View style={[styles.container, screenStyle]}>
-      {type === 'photo' && (
-        <Image source={source} style={StyleSheet.absoluteFill} resizeMode="cover" onLoadEnd={onMediaLoadEnd} onLoad={onMediaLoad} />
-      )}
-      {type === 'video' && (
-        <View style={[StyleSheet.absoluteFill, { backgroundColor: 'black', justifyContent: 'center', alignItems: 'center' }]}>
-          <Text style={{ color: 'white', fontSize: 18 }}>Video playback not yet implemented</Text>
-        </View>
-      )}
+    <View style={styles.container}>
+      <View style={styles.mediaFrame} onLayout={onMediaLayout}>
+        {type === "photo" && (
+          <>
+            <Image
+              source={source}
+              style={styles.mediaImage}
+              contentFit="contain"
+              onLoadEnd={onMediaLoadEnd}
+            />
+
+            <Pressable
+              style={StyleSheet.absoluteFill}
+              onPress={handleImagePress}
+              disabled={!canInteract}
+            >
+              <Svg style={StyleSheet.absoluteFill}>
+                {imageRect &&
+                  maskData &&
+                  maskRuns.map((run, index) => (
+                    <Rect
+                      key={`mask-run-${index}`}
+                      x={imageRect.x + (run.x / maskData.maskWidth) * imageRect.width}
+                      y={imageRect.y + (run.y / maskData.maskHeight) * imageRect.height}
+                      width={(run.width / maskData.maskWidth) * imageRect.width}
+                      height={(1 / maskData.maskHeight) * imageRect.height + 0.5}
+                      fill="rgba(34, 197, 94, 0.18)"
+                    />
+                  ))}
+
+                {imageRect &&
+                  detections.map((detection, index) => (
+                    <Rect
+                      key={`detection-${index}`}
+                      x={imageRect.x + detection.x1 * imageRect.width}
+                      y={imageRect.y + detection.y1 * imageRect.height}
+                      width={(detection.x2 - detection.x1) * imageRect.width}
+                      height={(detection.y2 - detection.y1) * imageRect.height}
+                      stroke="#22D3EE"
+                      strokeWidth={2}
+                      fill="transparent"
+                    />
+                  ))}
+
+                {polygonPoints.length > 0 && (
+                  <Polygon
+                    points={polygonPoints}
+                    fill="rgba(34, 197, 94, 0.28)"
+                    stroke="#22C55E"
+                    strokeWidth={2}
+                  />
+                )}
+
+                {imageRect &&
+                  points.map((point, index) => (
+                    <Circle
+                      key={`point-${index}`}
+                      cx={imageRect.x + point.x * imageRect.width}
+                      cy={imageRect.y + point.y * imageRect.height}
+                      r={6}
+                      fill={point.label === 1 ? "#22C55E" : "#EF4444"}
+                      stroke="white"
+                      strokeWidth={2}
+                    />
+                  ))}
+              </Svg>
+            </Pressable>
+          </>
+        )}
+
+        {type === "video" && (
+          <View style={styles.videoPlaceholder}>
+            <Text style={styles.videoPlaceholderText}>
+              Video playback not yet implemented
+            </Text>
+          </View>
+        )}
+
+        {showLoader && (
+          <View style={styles.loadingOverlay}>
+            <ActivityIndicator size="large" color="white" />
+            <Text style={styles.loadingText}>{statusText}</Text>
+          </View>
+        )}
+      </View>
 
       <TouchableOpacity style={styles.closeButton} onPress={router.back}>
         <Ionicons name="close" size={35} color="white" />
       </TouchableOpacity>
 
-      {type === 'photo' && (
-        <TouchableOpacity 
-          style={[styles.saveButton, { backgroundColor: theme.colors.primary }]} 
-          onPress={handleSaveToGallery}
-          disabled={isSaving}
-        >
-          {isSaving ? (
-            <ActivityIndicator size="small" color="white" />
-          ) : (
-            <>
-              <Ionicons name="download-outline" size={24} color="white" />
-              <Text style={styles.saveButtonText}>{tr('Media.saveToGallery')}</Text>
-            </>
-          )}
-        </TouchableOpacity>
+      {type === "photo" && (
+        <>
+          <View style={styles.topStatusCard}>
+            <Text style={styles.topStatusTitle}>MobileSAM</Text>
+            <Text style={styles.topStatusText}>
+              {detections.length > 0
+                ? `${detections.length} poop detection${detections.length === 1 ? "" : "s"}`
+                : "No poop detection, using image center"}
+            </Text>
+            <Text style={styles.topStatusText}>
+              {maskScore != null
+                ? `Mask confidence ${Math.round(maskScore * 100)}%`
+                : statusText}
+            </Text>
+            {errorText != null && (
+              <Text style={styles.errorText}>{errorText}</Text>
+            )}
+          </View>
+
+          <View style={styles.segmentationControls}>
+            <TouchableOpacity
+              style={[
+                styles.modeButton,
+                pointMode === 1 && styles.modeButtonPositiveActive,
+              ]}
+              onPress={() => setPointMode(1)}
+            >
+              <Text style={styles.modeButtonText}>Positive</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.modeButton,
+                pointMode === 0 && styles.modeButtonNegativeActive,
+              ]}
+              onPress={() => setPointMode(0)}
+            >
+              <Text style={styles.modeButtonText}>Negative</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.clearButton}
+              onPress={handleClearPoints}
+            >
+              <Text style={styles.clearButtonText}>Clear points</Text>
+            </TouchableOpacity>
+          </View>
+
+          <TouchableOpacity
+            style={[
+              styles.saveButton,
+              { backgroundColor: theme.colors.primary },
+            ]}
+            onPress={handleSaveToGallery}
+            disabled={isSaving}
+          >
+            {isSaving ? (
+              <ActivityIndicator size="small" color="white" />
+            ) : (
+              <>
+                <Ionicons name="download-outline" size={24} color="white" />
+                <Text style={styles.saveButtonText}>
+                  {tr("Media.saveToGallery")}
+                </Text>
+              </>
+            )}
+          </TouchableOpacity>
+        </>
       )}
     </View>
-  )
-}
+  );
+};
 
-export default MediaPage
+export default MediaPage;
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'black',
+    backgroundColor: "black",
+  },
+  mediaFrame: {
+    flex: 1,
+  },
+  mediaImage: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  videoPlaceholder: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "black",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  videoPlaceholderText: {
+    color: "white",
+    fontSize: 18,
   },
   closeButton: {
-    position: 'absolute',
+    position: "absolute",
     top: SAFE_AREA_PADDING.paddingTop,
     left: SAFE_AREA_PADDING.paddingLeft,
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: 'rgba(140, 140, 140, 0.3)',
-    justifyContent: 'center',
-    alignItems: 'center',
+    backgroundColor: "rgba(140, 140, 140, 0.3)",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  topStatusCard: {
+    position: "absolute",
+    top: SAFE_AREA_PADDING.paddingTop,
+    right: SAFE_AREA_PADDING.paddingRight,
+    maxWidth: 230,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 16,
+    backgroundColor: "rgba(0, 0, 0, 0.65)",
+    gap: 4,
+  },
+  topStatusTitle: {
+    color: "white",
+    fontSize: 15,
+    fontWeight: "700",
+  },
+  topStatusText: {
+    color: "white",
+    fontSize: 13,
+  },
+  segmentationControls: {
+    position: "absolute",
+    bottom: SAFE_AREA_PADDING.paddingBottom + 96,
+    left: 20,
+    right: 20,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  modeButton: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 12,
+    borderRadius: 16,
+    backgroundColor: "rgba(255, 255, 255, 0.16)",
+  },
+  modeButtonPositiveActive: {
+    backgroundColor: "rgba(34, 197, 94, 0.75)",
+  },
+  modeButtonNegativeActive: {
+    backgroundColor: "rgba(239, 68, 68, 0.75)",
+  },
+  modeButtonText: {
+    color: "white",
+    fontSize: 15,
+    fontWeight: "600",
+  },
+  clearButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 16,
+    backgroundColor: "rgba(15, 23, 42, 0.85)",
+  },
+  clearButtonText: {
+    color: "white",
+    fontSize: 14,
+    fontWeight: "600",
   },
   saveButton: {
-    position: 'absolute',
+    position: "absolute",
     bottom: SAFE_AREA_PADDING.paddingBottom + 20,
-    flexDirection: 'row',
-    alignItems: 'center',
+    left: 20,
+    right: 20,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
     paddingHorizontal: 24,
-    paddingVertical: 12,
+    paddingVertical: 14,
     borderRadius: 24,
     gap: 8,
   },
   saveButtonText: {
-    color: 'white',
+    color: "white",
     fontSize: 16,
-    fontWeight: '600',
+    fontWeight: "600",
   },
-})
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(0, 0, 0, 0.38)",
+    justifyContent: "center",
+    alignItems: "center",
+    gap: 10,
+  },
+  loadingText: {
+    color: "white",
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  errorText: {
+    color: "#FCA5A5",
+    fontSize: 13,
+  },
+  emptyText: {
+    color: "white",
+  },
+});
