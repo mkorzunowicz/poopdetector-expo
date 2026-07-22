@@ -1,4 +1,4 @@
-import { modelToString, type Detection } from "@/ai/detectors/types";
+import { type Detection } from "@/ai/detectors/types";
 import {
     decodeSamMask,
     detectPoopInPhoto,
@@ -6,9 +6,12 @@ import {
     getInitialSamPoint,
     loadPhotoImage,
     toFileUri,
+    VERBOSE_SAM_LOGS,
     type SamEmbeddings,
     type SamPoint,
 } from "@/ai/mobileSamPhoto";
+import { getSamVariant } from "@/ai/samModels";
+import { useCachedTensorflowModel } from "@/ai/tfliteModelCache";
 import { SAFE_AREA_PADDING } from "@/components/Constants";
 import { tr } from "@/i18n/i18n";
 import {
@@ -39,18 +42,20 @@ import type {
 import {
     ActivityIndicator,
     Alert,
+    Platform,
     Pressable,
     StyleSheet,
     Text,
     TouchableOpacity,
     View,
 } from "react-native";
-import { useTensorflowModel } from "react-native-fast-tflite";
+import {
+    useTensorflowModel,
+    type TensorflowModelDelegate,
+} from "react-native-fast-tflite";
 import Svg, { Circle, Polygon, Rect } from "react-native-svg";
 
 const DETECTION_MODEL_ASSET = require("../assets/yolox_nano_poop_cropped_only_best_float32.tflite");
-const SAM_ENCODER_MODEL_ASSET = require("../assets/mobilesam-samencoder.tflite");
-const SAM_DECODER_MODEL_ASSET = require("../assets/mobilesam-samdecoder.tflite");
 
 function getContainedImageRect(
   containerWidth: number,
@@ -92,11 +97,36 @@ function yieldToUi(): Promise<void> {
 }
 
 function logMediaSamUi(message: string, data?: Record<string, unknown>): void {
+  if (!VERBOSE_SAM_LOGS) {
+    return;
+  }
   if (data) {
     console.log(`[MediaSAM/UI] ${message}`, data);
     return;
   }
   console.log(`[MediaSAM/UI] ${message}`);
+}
+
+// Concise "(delegate) in [dtype[shape], ...] out [dtype[shape], ...]" summary,
+// e.g. "(android-gpu) in [float32[1,1024,1024,3]] out [float32[1,64,64,256]]".
+function formatModelLoadInfo(model: {
+  delegates: readonly string[];
+  inputs: readonly { dataType: string; shape: readonly number[] }[];
+  outputs: readonly { dataType: string; shape: readonly number[] }[];
+}): string {
+  const delegate = model.delegates.length > 0 ? model.delegates.join("+") : "cpu";
+  const fmt = (tensors: readonly { dataType: string; shape: readonly number[] }[]) =>
+    tensors.map((t) => `${t.dataType}[${t.shape.join(",")}]`).join(", ");
+  return `(${delegate}) in [${fmt(model.inputs)}] out [${fmt(model.outputs)}]`;
+}
+
+// Always-on one-line summary (model load / bootstrap timings).
+function logSamUi(message: string, data?: Record<string, unknown>): void {
+  if (data) {
+    console.log(`[SAM] ${message}`, data);
+    return;
+  }
+  console.log(`[SAM] ${message}`);
 }
 
 function logMediaSamUiError(
@@ -112,10 +142,18 @@ function logMediaSamUiError(
 }
 
 const MediaPage: React.FC = () => {
-  const { path, type } = useLocalSearchParams<{
+  const { path, type, sam } = useLocalSearchParams<{
     path: string;
     type: "photo" | "video";
+    sam?: string;
   }>();
+  // Which SAM pair to run -- chosen on the camera screen before capture and
+  // passed along; falls back to the default variant for older links.
+  const samVariant = useMemo(() => getSamVariant(sam), [sam]);
+  // URI of the orientation-normalized copy Nitro decoded; the <Image> renders
+  // this once bootstrap produces it so display and mask share one frame. Until
+  // then we fall back to the original path (loader covers the brief swap).
+  const [displayUri, setDisplayUri] = useState<string | null>(null);
   const [hasMediaLoaded, setHasMediaLoaded] = useState(false);
   const [isScreenFocused, setIsScreenFocused] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -146,10 +184,36 @@ const MediaPage: React.FC = () => {
   >(null);
   const detectionsRef = useRef<Detection[]>([]);
   const hasBootstrappedRef = useRef(false);
+  // Approx model-load start (first render). Models load in parallel via the
+  // hooks below, so each logs its own elapsed-since-mount when it goes ready.
+  const loadStartRef = useRef(Date.now());
 
-  const detectionModelHook = useTensorflowModel(DETECTION_MODEL_ASSET, []);
-  const samEncoderHook = useTensorflowModel(SAM_ENCODER_MODEL_ASSET, []);
-  const samDecoderHook = useTensorflowModel(SAM_DECODER_MODEL_ASSET, []);
+  // GPU-accelerate the SAM encoder -- it's the multi-second bottleneck (a
+  // 1024x1024 ViT). iOS -> Core ML, Android -> GPU delegate; both fall back to
+  // CPU per-unsupported-op automatically. Detection stays CPU (proven, and it's
+  // a separate frame path). Decoder stays CPU too: its point_labels are INT64,
+  // which GPU delegates generally don't support, so a delegate there would just
+  // fall back anyway (and it's already ~0.5s). Flip to [] to A/B against CPU.
+  const samEncoderDelegates = useMemo<TensorflowModelDelegate[]>(
+    () =>
+      Platform.OS === "ios"
+        ? ["core-ml"]
+        : Platform.OS === "android"
+          ? ["android-gpu"]
+          : [],
+    [],
+  );
+
+  // Cached: the camera screen (useDetectorYoloXNanoPoop) already loads this
+  // exact asset with delegates=[] as its CPU-fallback instance, so by the
+  // time a photo is captured and this screen mounts, this is a cache hit --
+  // no ~900ms reload. See ai/tfliteModelCache.ts.
+  const detectionModelHook = useCachedTensorflowModel(DETECTION_MODEL_ASSET, []);
+  const samEncoderHook = useTensorflowModel(
+    samVariant.encoderAsset,
+    samEncoderDelegates,
+  );
+  const samDecoderHook = useTensorflowModel(samVariant.decoderAsset, []);
 
   const detectionModel =
     detectionModelHook.state === "loaded" ? detectionModelHook.model : null;
@@ -160,27 +224,30 @@ const MediaPage: React.FC = () => {
 
   useEffect(() => {
     if (detectionModel) {
-      logMediaSamUi("Detection model ready", {
-        model: modelToString(detectionModel),
-      });
+      logSamUi(
+        `detector model loaded in ${Date.now() - loadStartRef.current}ms ` +
+          formatModelLoadInfo(detectionModel),
+      );
     }
   }, [detectionModel]);
 
   useEffect(() => {
     if (samEncoderModel) {
-      logMediaSamUi("SAM encoder model ready", {
-        model: modelToString(samEncoderModel),
-      });
+      logSamUi(
+        `${samVariant.name} encoder loaded in ${Date.now() - loadStartRef.current}ms ` +
+          formatModelLoadInfo(samEncoderModel),
+      );
     }
-  }, [samEncoderModel]);
+  }, [samEncoderModel, samVariant.name]);
 
   useEffect(() => {
     if (samDecoderModel) {
-      logMediaSamUi("SAM decoder model ready", {
-        model: modelToString(samDecoderModel),
-      });
+      logSamUi(
+        `${samVariant.name} decoder loaded in ${Date.now() - loadStartRef.current}ms ` +
+          formatModelLoadInfo(samDecoderModel),
+      );
     }
-  }, [samDecoderModel]);
+  }, [samDecoderModel, samVariant.name]);
 
   useFocusEffect(
     useCallback(() => {
@@ -197,6 +264,7 @@ const MediaPage: React.FC = () => {
     embeddingsRef.current = null;
     encoderContextRef.current = null;
     setHasMediaLoaded(false);
+    setDisplayUri(null);
     setIsBootstrapping(false);
     setIsDecoding(false);
     setPhotoSize({ width: 0, height: 0 });
@@ -208,9 +276,14 @@ const MediaPage: React.FC = () => {
     setMaskScore(null);
     setStatusText("Loading models...");
     setErrorText(null);
-  }, [path, type]);
+  }, [path, type, sam]);
 
-  const source = useMemo(() => ({ uri: toFileUri(path ?? "") }), [path]);
+  // Prefer the orientation-normalized copy once bootstrap has produced it; fall
+  // back to the original file until then (the loading overlay hides the swap).
+  const source = useMemo(
+    () => ({ uri: displayUri ?? toFileUri(path ?? "") }),
+    [displayUri, path],
+  );
   const imageRect = useMemo(
     () =>
       getContainedImageRect(
@@ -230,9 +303,9 @@ const MediaPage: React.FC = () => {
     detectionModelHook.state === "error"
       ? "Failed to load poop detection model."
       : samEncoderHook.state === "error"
-        ? "Failed to load MobileSAM encoder model."
+        ? `Failed to load ${samVariant.name} encoder model.`
         : samDecoderHook.state === "error"
-          ? "Failed to load MobileSAM decoder model."
+          ? `Failed to load ${samVariant.name} decoder model.`
           : null;
 
   useEffect(() => {
@@ -309,7 +382,7 @@ const MediaPage: React.FC = () => {
           return;
         }
 
-        setStatusText("Decoding MobileSAM mask...");
+        setStatusText("Decoding SAM mask...");
         await yieldToUi();
         const result = await decodeSamMask(
           samDecoderModel,
@@ -345,7 +418,7 @@ const MediaPage: React.FC = () => {
           elapsedMs: Date.now() - startTime,
           pointCount: nextPoints.length,
         });
-        setErrorText("Failed to decode MobileSAM mask.");
+        setErrorText("Failed to decode SAM mask.");
       } finally {
         setIsDecoding(false);
       }
@@ -382,6 +455,7 @@ const MediaPage: React.FC = () => {
         if (isCancelled) return;
 
         photoRef.current = photo;
+        setDisplayUri(photo.displayUri);
         setPhotoSize({ width: photo.width, height: photo.height });
 
         setStatusText("Detecting poop...");
@@ -394,11 +468,12 @@ const MediaPage: React.FC = () => {
           elapsedMs: Date.now() - startTime,
         });
 
-        setStatusText("Encoding MobileSAM...");
+        setStatusText(`Encoding ${samVariant.name}...`);
         await yieldToUi();
         const { embeddings, context } = await encodePhotoForSam(
           samEncoderModel,
           photo.image,
+          samVariant.preprocessing,
           async (message) => {
             setStatusText(message);
             await yieldToUi();
@@ -429,13 +504,18 @@ const MediaPage: React.FC = () => {
           : [getInitialSamPoint(nextDetections)];
 
         setPoints(seededPoints);
-        setStatusText("Decoding initial MobileSAM mask...");
+        setStatusText("Decoding initial SAM mask...");
         await yieldToUi();
         await runSegmentation(seededPoints);
         logMediaSamUi("bootstrap complete", {
           elapsedMs: Date.now() - startTime,
           seededPointCount: seededPoints.length,
         });
+        logSamUi(
+          `Ready in ${Date.now() - startTime}ms ` +
+            `(${nextDetections.length} detection${nextDetections.length === 1 ? "" : "s"}, ` +
+            `${samVariant.name})`,
+        );
       } catch (error) {
         logMediaSamUiError("bootstrap failed", error, {
           elapsedMs: Date.now() - startTime,
@@ -468,6 +548,7 @@ const MediaPage: React.FC = () => {
     runSegmentation,
     samDecoderModel,
     samEncoderModel,
+    samVariant,
     type,
   ]);
 
@@ -731,7 +812,7 @@ const MediaPage: React.FC = () => {
       {type === "photo" && (
         <>
           <View style={styles.topStatusCard}>
-            <Text style={styles.topStatusTitle}>MobileSAM</Text>
+            <Text style={styles.topStatusTitle}>{samVariant.name}</Text>
             <Text style={styles.topStatusText}>
               {detections.length > 0
                 ? `${detections.length} poop detection${detections.length === 1 ? "" : "s"}`

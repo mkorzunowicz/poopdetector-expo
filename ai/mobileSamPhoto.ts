@@ -1,3 +1,4 @@
+import { ImageManipulator, SaveFormat } from "expo-image-manipulator";
 import type { TensorflowModel } from "react-native-fast-tflite";
 import { loadImage, type Image as NitroImage } from "react-native-nitro-image";
 
@@ -9,6 +10,24 @@ const YOLOX_STRIDES = [8, 16, 32] as const;
 const SAM_ENCODER_SIZE = 1024;
 const SAM_MASK_SIZE = 256;
 const SAM_MODEL_TIMEOUT_MS = 15000;
+// Facebook SAM's pixel_mean (0-255 scale). The Qualcomm AI Hub MobileSAM export
+// pre-divides this by 255 and subtracts it inside the compiled encoder graph, so
+// filling the encoder's letterbox padding with this color makes the padded region
+// normalize to exactly 0 -- matching both Qualcomm's qai_hub_models SAMApp
+// preprocessing AND the reference C# MobileSam implementation's aspect-preserving
+// resize + pad-to-1024 approach (AspectRatioResizer.cs / MobileSamImageProcessor.cs).
+const SAM_PAD_PIXEL_RGB: readonly [number, number, number] = [
+  123.675, 116.28, 103.53,
+];
+// The bundled 3-input decoder (point_coords[1,2,2]) is a TFLite export with a
+// FIXED, compile-time-baked shape: exactly one real point slot plus one
+// mandatory "not-a-point" pad slot. Confirmed via Netron AND runtime
+// model.inputs introspection. Unlike the reference C# app's ONNX decoder
+// (mask_input/has_mask_input/orig_im_size, dynamic point count), TFLite can't
+// accept a variable number of points in one call -- there is no N to extend.
+// We fan out extra taps into independent single-point decodes and combine
+// client-side instead, capped so a long tap history stays fast.
+const MAX_PROMPT_POINTS_PER_LABEL = 5;
 
 type RawPixelFormat =
   | "ARGB"
@@ -31,7 +50,14 @@ interface GridCoordinate {
 
 export interface PhotoImageData {
   image: NitroImage;
+  /** Original captured file path -- used as the persistence/gallery key. */
   filePath: string;
+  /**
+   * URI of the orientation-normalized copy actually decoded by Nitro. The
+   * on-screen <Image> must render THIS (not the original path) so the display
+   * and the mask share one coordinate frame on Android. See loadPhotoImage.
+   */
+  displayUri: string;
   width: number;
   height: number;
 }
@@ -42,11 +68,36 @@ export interface SamPoint {
   label: 0 | 1;
 }
 
+/**
+ * Per-model-family encoder preprocessing convention. Each bundled SAM export
+ * was traced to a proven reference implementation:
+ * - MobileSAM (Qualcomm AI Hub): letterbox (aspect-preserving, long side ->
+ *   1024, pixel-mean pad), values in [0,1] -> mean 0 / std 255.
+ * - EdgeSAM (exported from the working C# app's ONNX models,
+ *   EdgeSamImageProcessor.cs): SQUASH resize to 1024x1024 ("stretching if
+ *   needed"), ImageNet normalization (byte - mean)/std.
+ */
+export interface SamPreprocessing {
+  geometry: "letterbox" | "squash";
+  /** Per-RGB-channel: value = (byte - mean[c]) / std[c]. */
+  mean: readonly [number, number, number];
+  std: readonly [number, number, number];
+}
+
 export interface SamEncoderContext {
   originalWidth: number;
   originalHeight: number;
+  /** Full square encoder canvas size (always SAM_ENCODER_SIZE). */
   encoderWidth: number;
   encoderHeight: number;
+  /**
+   * Size of the actual (non-padding) image content within the encoder canvas,
+   * after an aspect-preserving resize (long side -> SAM_ENCODER_SIZE). One of
+   * these equals encoderWidth/encoderHeight; the other is smaller when the
+   * source image isn't square. The remaining canvas area is letterbox padding.
+   */
+  contentWidth: number;
+  contentHeight: number;
 }
 
 export interface SamDecodeResult {
@@ -70,12 +121,29 @@ type SamProgressCallback = (message: string) => void | Promise<void>;
 
 const yoloxGridCache: Record<number, GridCoordinate[]> = {};
 
+// Flip to true for the detailed per-step pipeline trace (tensor shapes, raw
+// pixel buffers, mask stats, per-model-run start/complete, etc). Default off so
+// the console shows only the concise timing summaries from logSam().
+export const VERBOSE_SAM_LOGS = false;
+
 function logMediaSam(message: string, data?: Record<string, unknown>): void {
+  if (!VERBOSE_SAM_LOGS) {
+    return;
+  }
   if (data) {
     console.log(`[MediaSAM] ${message}`, data);
     return;
   }
   console.log(`[MediaSAM] ${message}`);
+}
+
+// Always-on, one-line summary log (timings). Kept terse on purpose.
+function logSam(message: string, data?: Record<string, unknown>): void {
+  if (data) {
+    console.log(`[SAM] ${message}`, data);
+    return;
+  }
+  console.log(`[SAM] ${message}`);
 }
 
 function logMediaSamError(
@@ -112,10 +180,37 @@ export function toFileUri(path: string): string {
 export async function loadPhotoImage(path: string): Promise<PhotoImageData> {
   const startTime = measureStart();
   const filePath = normalizeFilePath(path);
-  const image = await Promise.resolve(loadImage({ filePath }));
+
+  // Bake EXIF orientation into the pixels before Nitro touches the file.
+  // react-native-nitro-image decodes via BitmapFactory on Android, which
+  // IGNORES the EXIF orientation tag, so a tilted-capture photo comes in
+  // rotated 90deg vs what expo-image (Glide, EXIF-aware) displays -- making the
+  // computed mask appear rotated on screen. expo-image-manipulator decodes
+  // through the EXIF-aware loader and re-encodes, so the saved copy has upright
+  // pixels and no orientation tag left to misinterpret. Both platforms then
+  // agree; harmless on iOS (Nitro already honors EXIF there).
+  let displayUri = toFileUri(filePath);
+  try {
+    const normalized = await ImageManipulator.manipulate(displayUri)
+      .renderAsync()
+      .then((rendered) =>
+        rendered.saveAsync({ format: SaveFormat.JPEG, compress: 1 }),
+      );
+    displayUri = normalized.uri;
+  } catch (error) {
+    logMediaSamError(
+      "Orientation normalize failed, using original file",
+      error,
+    );
+  }
+
+  const image = await Promise.resolve(
+    loadImage({ filePath: normalizeFilePath(displayUri) }),
+  );
 
   logMediaSam("Photo loaded", {
     filePath,
+    displayUri,
     width: image.width,
     height: image.height,
     elapsedMs: elapsedMs(startTime),
@@ -124,6 +219,7 @@ export async function loadPhotoImage(path: string): Promise<PhotoImageData> {
   return {
     image,
     filePath,
+    displayUri,
     width: image.width,
     height: image.height,
   };
@@ -225,6 +321,70 @@ function rawPixelsToRgbFloatDataResampled(
         (bytes[sourceIndex + greenIndex] ?? 0) * pixelScale;
       output[targetIndex + 2] =
         (bytes[sourceIndex + blueIndex] ?? 0) * pixelScale;
+    }
+  }
+
+  return output;
+}
+
+// Packs `raw` (already resized to contentWidth x contentHeight, aspect-preserving)
+// into the top-left corner of a canvasSize x canvasSize canvas, normalizing
+// each channel as (byte - mean) / std per `preprocessing`. Any remaining
+// letterbox padding is filled with SAM's pixel-mean color so it normalizes to
+// ~0 (for squash geometry content covers the whole canvas and no pad is
+// written). Mirrors Qualcomm's ResizeLongestSide + pixel_mean-pad for
+// MobileSAM and the C# EdgeSamImageProcessor's stretch + ImageNet
+// normalization for EdgeSAM.
+function packSamEncoderInput(
+  raw: RawPixelDataLike,
+  contentWidth: number,
+  contentHeight: number,
+  canvasSize: number,
+  preprocessing: SamPreprocessing,
+): Float32Array {
+  const [meanR, meanG, meanB] = preprocessing.mean;
+  const [stdR, stdG, stdB] = preprocessing.std;
+  const output = new Float32Array(canvasSize * canvasSize * 3);
+
+  if (contentWidth < canvasSize || contentHeight < canvasSize) {
+    const [padByteR, padByteG, padByteB] = SAM_PAD_PIXEL_RGB;
+    const padR = (padByteR - meanR) / stdR;
+    const padG = (padByteG - meanG) / stdG;
+    const padB = (padByteB - meanB) / stdB;
+    for (let index = 0; index < output.length; index += 3) {
+      output[index] = padR;
+      output[index + 1] = padG;
+      output[index + 2] = padB;
+    }
+  }
+
+  const bytes = new Uint8Array(raw.buffer);
+  const sourceWidth = raw.width;
+  const sourceHeight = raw.height;
+  const pixelCount = sourceWidth * sourceHeight;
+  const bytesPerPixel = pixelCount > 0 ? bytes.length / pixelCount : 0;
+  const [redIndex, greenIndex, blueIndex, stride] = resolveRgbIndices(
+    raw.pixelFormat as RawPixelFormat,
+    bytesPerPixel,
+  );
+
+  for (let targetY = 0; targetY < contentHeight; targetY += 1) {
+    const sourceY = Math.min(
+      sourceHeight - 1,
+      Math.floor(((targetY + 0.5) * sourceHeight) / contentHeight),
+    );
+    for (let targetX = 0; targetX < contentWidth; targetX += 1) {
+      const sourceX = Math.min(
+        sourceWidth - 1,
+        Math.floor(((targetX + 0.5) * sourceWidth) / contentWidth),
+      );
+      const sourceIndex = (sourceY * sourceWidth + sourceX) * stride;
+      const targetIndex = (targetY * canvasSize + targetX) * 3;
+      output[targetIndex] = ((bytes[sourceIndex + redIndex] ?? 0) - meanR) / stdR;
+      output[targetIndex + 1] =
+        ((bytes[sourceIndex + greenIndex] ?? 0) - meanG) / stdG;
+      output[targetIndex + 2] =
+        ((bytes[sourceIndex + blueIndex] ?? 0) - meanB) / stdB;
     }
   }
 
@@ -472,18 +632,46 @@ function clamp(value: number, min: number, max: number): number {
 
 async function resizeForSamEncoder(
   image: NitroImage,
+  geometry: SamPreprocessing["geometry"],
 ): Promise<{ image: NitroImage; context: SamEncoderContext }> {
-  const encoderWidth = SAM_ENCODER_SIZE;
-  const encoderHeight = SAM_ENCODER_SIZE;
-  const resized = await image.resizeAsync(encoderWidth, encoderHeight);
+  const originalWidth = image.width;
+  const originalHeight = image.height;
+
+  let contentWidth = SAM_ENCODER_SIZE;
+  let contentHeight = SAM_ENCODER_SIZE;
+
+  if (geometry === "letterbox") {
+    // Aspect-preserving resize (long side -> 1024); MobileSAM convention
+    // (Qualcomm export preprocessing + C# AspectRatioResizer.cs).
+    // packSamEncoderInput pads the remaining canvas area with pixel-mean.
+    const longestSide = Math.max(originalWidth, originalHeight);
+    const letterboxScale = longestSide > 0 ? SAM_ENCODER_SIZE / longestSide : 1;
+    contentWidth = Math.max(
+      1,
+      Math.min(SAM_ENCODER_SIZE, Math.round(originalWidth * letterboxScale)),
+    );
+    contentHeight = Math.max(
+      1,
+      Math.min(SAM_ENCODER_SIZE, Math.round(originalHeight * letterboxScale)),
+    );
+  }
+  // else "squash": stretch straight to 1024x1024 (EdgeSAM convention, per the
+  // proven C# EdgeSamImageProcessor: "resize to 1024x1024 (stretching if
+  // needed)"). Content covers the full canvas, so downstream coordinate math
+  // (points scaled by contentWidth/Height, cropMaskToContent no-op) degrades
+  // to a plain full-frame mapping automatically.
+
+  const resized = await image.resizeAsync(contentWidth, contentHeight);
 
   return {
     image: resized,
     context: {
-      originalWidth: image.width,
-      originalHeight: image.height,
-      encoderWidth,
-      encoderHeight,
+      originalWidth,
+      originalHeight,
+      encoderWidth: SAM_ENCODER_SIZE,
+      encoderHeight: SAM_ENCODER_SIZE,
+      contentWidth,
+      contentHeight,
     },
   };
 }
@@ -604,6 +792,7 @@ async function reportSamProgress(
 export async function encodePhotoForSam(
   model: TensorflowModel,
   image: NitroImage,
+  preprocessing: SamPreprocessing,
   onProgress?: SamProgressCallback,
 ): Promise<{
   embeddings: SamEmbeddings;
@@ -613,60 +802,77 @@ export async function encodePhotoForSam(
   logMediaSam("Encoder pipeline begin", {
     imageWidth: image.width,
     imageHeight: image.height,
+    preprocessing,
   });
 
-  await reportSamProgress(onProgress, "Resizing MobileSAM input...");
+  await reportSamProgress(onProgress, "Resizing SAM input...");
   const resizeStart = measureStart();
-  const { image: resized, context } = await resizeForSamEncoder(image);
+  const { image: resized, context } = await resizeForSamEncoder(
+    image,
+    preprocessing.geometry,
+  );
+  const resizeMs = elapsedMs(resizeStart);
   logMediaSam("Encoder resize complete", {
-    elapsedMs: elapsedMs(resizeStart),
+    elapsedMs: resizeMs,
     resizedWidth: resized.width,
     resizedHeight: resized.height,
     context,
   });
 
-  await reportSamProgress(onProgress, "Reading MobileSAM pixels...");
+  await reportSamProgress(onProgress, "Reading SAM pixels...");
   const readPixelsStart = measureStart();
   const rawPixels = await resized.toRawPixelDataAsync();
+  const readPixelsMs = elapsedMs(readPixelsStart);
   logMediaSam("Encoder raw pixels ready", {
-    elapsedMs: elapsedMs(readPixelsStart),
+    elapsedMs: readPixelsMs,
     rawWidth: rawPixels.width,
     rawHeight: rawPixels.height,
     pixelFormat: rawPixels.pixelFormat,
     byteLength: rawPixels.buffer.byteLength,
   });
 
-  await reportSamProgress(onProgress, "Packing MobileSAM encoder tensor...");
+  await reportSamProgress(onProgress, "Packing SAM encoder tensor...");
   const packStart = measureStart();
-  const inputData = rawPixelsToRgbFloatDataResampled(
+  const inputData = packSamEncoderInput(
     rawPixels as RawPixelDataLike,
+    context.contentWidth,
+    context.contentHeight,
     SAM_ENCODER_SIZE,
-    SAM_ENCODER_SIZE,
-    1 / 255,
+    preprocessing,
   );
+  const packMs = elapsedMs(packStart);
   logMediaSam("Encoder tensor packed", {
-    elapsedMs: elapsedMs(packStart),
+    elapsedMs: packMs,
     rawWidth: rawPixels.width,
     rawHeight: rawPixels.height,
+    contentWidth: context.contentWidth,
+    contentHeight: context.contentHeight,
     inputLength: inputData.length,
     inputBytes: inputData.byteLength,
     expectedLength: SAM_ENCODER_SIZE * SAM_ENCODER_SIZE * 3,
   });
 
-  await reportSamProgress(onProgress, "Running MobileSAM encoder...");
+  await reportSamProgress(onProgress, "Running SAM encoder...");
+  const inferStart = measureStart();
   const output = await runModelAsync(
     model,
     [toExactArrayBuffer(inputData)],
-    "MobileSAM encoder",
+    "SAM encoder",
   );
+  const inferMs = elapsedMs(inferStart);
 
+  const totalMs = elapsedMs(startTime);
   logMediaSam("Encoder pipeline complete", {
-    elapsedMs: elapsedMs(startTime),
+    elapsedMs: totalMs,
     embeddingLength:
       output[0]?.byteLength != null
         ? output[0]!.byteLength / Float32Array.BYTES_PER_ELEMENT
         : 0,
   });
+  logSam(
+    `Encoded in ${totalMs}ms ` +
+      `(resize ${resizeMs}, read ${readPixelsMs}, pack ${packMs}, infer ${inferMs})`,
+  );
 
   return {
     embeddings: output[0]!,
@@ -674,19 +880,26 @@ export async function encodePhotoForSam(
   };
 }
 
-function selectMaskSlice(outputs: Float32Array[]): {
+function selectMaskSlice(
+  outputs: Float32Array[],
+  // Declared output shapes from model.outputs, index-aligned with `outputs`.
+  // Used to detect channel-last multi-mask layouts; optional for callers that
+  // don't have shape metadata.
+  maskShapes?: Array<number[] | undefined>,
+): {
   logits: Float32Array;
   score: number;
 } {
-  const maskTensor = outputs.find(
+  const maskTensorIndex = outputs.findIndex(
     (candidate) => candidate.length >= SAM_MASK_SIZE * SAM_MASK_SIZE,
   );
+  const maskTensor = maskTensorIndex >= 0 ? outputs[maskTensorIndex]! : null;
   const scoreTensor = outputs.find(
     (candidate) => candidate.length > 0 && candidate.length <= 16,
   );
 
   if (!maskTensor) {
-    throw new Error("MobileSAM decoder did not return a mask tensor.");
+    throw new Error("SAM decoder did not return a mask tensor.");
   }
 
   const maskCount = Math.max(
@@ -701,6 +914,8 @@ function selectMaskSlice(outputs: Float32Array[]): {
     };
   }
 
+  // Multi-mask decoder (EdgeSAM: 4 candidates + 4 scores). Pick the highest
+  // predicted-IoU candidate -- SAM's standard ambiguity resolution.
   let bestIndex = 0;
   let bestScore = Number.NEGATIVE_INFINITY;
   for (let index = 0; index < maskCount; index += 1) {
@@ -711,12 +926,43 @@ function selectMaskSlice(outputs: Float32Array[]): {
     }
   }
 
-  const sliceStart = bestIndex * SAM_MASK_SIZE * SAM_MASK_SIZE;
-  return {
-    logits: maskTensor.slice(
+  // Layout: [1,K,256,256] stores each candidate as a contiguous 256x256
+  // plane; a channel-last export ([1,256,256,K], e.g. via ai-edge-torch's
+  // to_channel_last_io) interleaves the K candidates per pixel. Use the
+  // declared output shape to tell them apart -- slicing an interleaved
+  // tensor as planes would scramble the mask.
+  const maskShape = maskShapes?.[maskTensorIndex];
+  const isChannelLast =
+    maskShape != null &&
+    maskShape.length === 4 &&
+    maskShape[3] === maskCount &&
+    maskShape[1] === SAM_MASK_SIZE;
+
+  let logits: Float32Array;
+  if (isChannelLast) {
+    logits = new Float32Array(SAM_MASK_SIZE * SAM_MASK_SIZE);
+    for (let pixel = 0; pixel < logits.length; pixel += 1) {
+      logits[pixel] = maskTensor[pixel * maskCount + bestIndex]!;
+    }
+  } else {
+    const sliceStart = bestIndex * SAM_MASK_SIZE * SAM_MASK_SIZE;
+    logits = maskTensor.slice(
       sliceStart,
       sliceStart + SAM_MASK_SIZE * SAM_MASK_SIZE,
-    ),
+    );
+  }
+
+  logMediaSam("Mask candidate selected", {
+    maskCount,
+    bestIndex,
+    bestScore,
+    maskShape,
+    isChannelLast,
+    scores: scoreTensor ? Array.from(scoreTensor) : null,
+  });
+
+  return {
+    logits,
     score: Number.isFinite(bestScore) ? bestScore : 0,
   };
 }
@@ -778,6 +1024,89 @@ function polygonArea(points: Array<{ x: number; y: number }>): number {
     area += current.x * next.y - next.x * current.y;
   }
   return area * 0.5;
+}
+
+function isPointInPolygon(
+  point: { x: number; y: number },
+  polygon: Array<{ x: number; y: number }>,
+): boolean {
+  let inside = false;
+  for (
+    let i = 0, j = polygon.length - 1;
+    i < polygon.length;
+    j = i, i += 1
+  ) {
+    const a = polygon[i]!;
+    const b = polygon[j]!;
+    const intersects =
+      a.y > point.y !== b.y > point.y &&
+      point.x < ((b.x - a.x) * (point.y - a.y)) / (b.y - a.y) + a.x;
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+function distanceToNearestVertex(
+  point: { x: number; y: number },
+  polygon: Array<{ x: number; y: number }>,
+): number {
+  let minDistance = Number.POSITIVE_INFINITY;
+  for (const vertex of polygon) {
+    const distance = Math.hypot(vertex.x - point.x, vertex.y - point.y);
+    if (distance < minDistance) minDistance = distance;
+  }
+  return minDistance;
+}
+
+function selectLargestContour(
+  contours: Array<Array<{ x: number; y: number }>>,
+): Array<{ x: number; y: number }> {
+  let largestContour = contours[0]!;
+  let largestArea = Math.abs(polygonArea(largestContour));
+  for (const contour of contours.slice(1)) {
+    const area = Math.abs(polygonArea(contour));
+    if (area > largestArea) {
+      largestArea = area;
+      largestContour = contour;
+    }
+  }
+  return largestContour;
+}
+
+// A binary mask can have multiple disconnected foreground blobs. With several
+// accumulated positive taps (see decodeSamMask's per-point union), each tap
+// can legitimately produce its own blob. Prefer the blob containing the MOST
+// RECENTLY tapped point (referencePoints is oldest-first) over blind
+// largest-area, so the last thing you tapped is what gets outlined.
+function selectRelevantContour(
+  contours: Array<Array<{ x: number; y: number }>>,
+  referencePoints: Array<{ x: number; y: number }>,
+): Array<{ x: number; y: number }> {
+  if (contours.length === 1 || referencePoints.length === 0) {
+    return selectLargestContour(contours);
+  }
+
+  for (let index = referencePoints.length - 1; index >= 0; index -= 1) {
+    const referencePoint = referencePoints[index]!;
+    const containingContour = contours.find((contour) =>
+      isPointInPolygon(referencePoint, contour),
+    );
+    if (containingContour) {
+      return containingContour;
+    }
+  }
+
+  const mostRecentPoint = referencePoints[referencePoints.length - 1]!;
+  let best = contours[0]!;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const contour of contours) {
+    const distance = distanceToNearestVertex(mostRecentPoint, contour);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = contour;
+    }
+  }
+  return best;
 }
 
 function buildContourFromSegments(
@@ -860,6 +1189,7 @@ function marchingSquaresContour(
   binaryMask: Uint8Array,
   width: number,
   height: number,
+  referencePoints: Array<{ x: number; y: number }>,
 ): Array<{ x: number; y: number }> {
   const segments: Array<[{ x: number; y: number }, { x: number; y: number }]> =
     [];
@@ -928,17 +1258,7 @@ function marchingSquaresContour(
     return [];
   }
 
-  let largestContour = contours[0]!;
-  let largestArea = Math.abs(polygonArea(largestContour));
-  for (const contour of contours.slice(1)) {
-    const area = Math.abs(polygonArea(contour));
-    if (area > largestArea) {
-      largestArea = area;
-      largestContour = contour;
-    }
-  }
-
-  return largestContour;
+  return selectRelevantContour(contours, referencePoints);
 }
 
 function perpendicularDistance(
@@ -1002,8 +1322,21 @@ function maskToPolygon(
   maskHeight: number,
   originalWidth: number,
   originalHeight: number,
+  // Normalized (0..1, original-image-space) prompt points, oldest-first, used
+  // to pick the foreground blob the user actually meant when the mask has
+  // more than one disconnected region. See selectRelevantContour.
+  referencePointsNormalized: Array<{ x: number; y: number }>,
 ): Array<{ x: number; y: number }> {
-  const contour = marchingSquaresContour(binaryMask, maskWidth, maskHeight);
+  const referencePoints = referencePointsNormalized.map((point) => ({
+    x: point.x * maskWidth,
+    y: point.y * maskHeight,
+  }));
+  const contour = marchingSquaresContour(
+    binaryMask,
+    maskWidth,
+    maskHeight,
+    referencePoints,
+  );
   if (contour.length === 0) {
     return [];
   }
@@ -1013,6 +1346,51 @@ function maskToPolygon(
     x: Math.round((point.x / maskWidth) * originalWidth),
     y: Math.round((point.y / maskHeight) * originalHeight),
   }));
+}
+
+// The decoder's mask covers the full encoder canvas (which includes letterbox
+// padding), but only the top-left contentWidth x contentHeight (scaled to
+// mask resolution) corresponds to real image content. Crop down to that
+// region so downstream code (maskToPolygon, the UI's row-run renderer) can
+// keep mapping mask-space directly to original-image-space via a simple
+// width/height ratio, exactly as if no padding ever existed.
+function cropMaskToContent(
+  mask: Uint8Array,
+  canvasWidth: number,
+  canvasHeight: number,
+  context: SamEncoderContext,
+): { mask: Uint8Array; width: number; height: number } {
+  const contentWidth = Math.max(
+    1,
+    Math.min(
+      canvasWidth,
+      Math.round((canvasWidth * context.contentWidth) / context.encoderWidth),
+    ),
+  );
+  const contentHeight = Math.max(
+    1,
+    Math.min(
+      canvasHeight,
+      Math.round(
+        (canvasHeight * context.contentHeight) / context.encoderHeight,
+      ),
+    ),
+  );
+
+  if (contentWidth === canvasWidth && contentHeight === canvasHeight) {
+    return { mask, width: canvasWidth, height: canvasHeight };
+  }
+
+  const cropped = new Uint8Array(contentWidth * contentHeight);
+  for (let y = 0; y < contentHeight; y += 1) {
+    const sourceRow = y * canvasWidth;
+    const targetRow = y * contentWidth;
+    cropped.set(
+      mask.subarray(sourceRow, sourceRow + contentWidth),
+      targetRow,
+    );
+  }
+  return { mask: cropped, width: contentWidth, height: contentHeight };
 }
 
 export function getInitialSamPoint(detections: Detection[]): SamPoint {
@@ -1028,67 +1406,119 @@ export function getInitialSamPoint(detections: Detection[]): SamPoint {
   return { x: 0.5, y: 0.5, label: 1 };
 }
 
-function tensorElementCount(shape: number[]): number | null {
-  if (shape.length === 0) {
-    return null;
-  }
-
-  let product = 1;
-  for (const dimension of shape) {
-    if (dimension <= 0) {
-      return null;
-    }
-    product *= dimension;
-  }
-  return product;
+// Compiled prompt-slot count from the model itself (point_coords[1,N,2]).
+// The bundled MobileSAM decoder has N=1 (single real point + internal pad),
+// the litert-torch re-export and EdgeSAM have N=2 (two real points). Whatever
+// N is, we must supply exactly N coord pairs / labels.
+function getPromptSlots(model: TensorflowModel): number {
+  const declaredSlots = model.inputs[1]?.shape?.[1];
+  return declaredSlots != null && declaredSlots >= 1 ? declaredSlots : 1;
 }
 
-function getPromptCapacity(model: TensorflowModel): number | null {
-  const coordsTensor = model.inputs[1];
-  const labelsTensor = model.inputs[2];
-  if (!coordsTensor || !labelsTensor) {
-    return null;
-  }
-
-  const coordsElementCount = tensorElementCount(coordsTensor.shape);
-  const labelsElementCount = tensorElementCount(labelsTensor.shape);
-
-  const coordsCapacity =
-    coordsElementCount != null ? Math.floor(coordsElementCount / 2) : null;
-
-  if (coordsCapacity != null && labelsElementCount != null) {
-    return Math.min(coordsCapacity, labelsElementCount);
-  }
-
-  return coordsCapacity ?? labelsElementCount;
-}
-
-type LiteSamCoordinateMode = "normalized" | "encoder-space";
-
-function buildLiteSamPromptInputs(
+// Decodes a batch of up to `promptSlots` real points in ONE decoder run --
+// genuine multipoint segmentation where the model supports it (SAM reasons
+// about all prompt points jointly), NOT a client-side union. Unused slots are
+// filled with the "not-a-point" pad (label -1). Coordinates are in the
+// encoder's 1024x1024 canvas pixel frame, scaled by the content (unpadded)
+// dimensions (== full canvas for squash geometry).
+async function decodeLiteSamPoints(
   model: TensorflowModel,
-  points: SamPoint[],
+  embeddings: SamEmbeddings,
   context: SamEncoderContext,
-  coordinateMode: LiteSamCoordinateMode,
-): { pointCoords: Float32Array; pointLabels: Float32Array } {
-  const promptCapacity = getPromptCapacity(model) ?? 2;
-  const effectiveCapacity = Math.max(1, promptCapacity);
-  const effectivePoints = points.slice(-effectiveCapacity);
-  const pointCoords = new Float32Array(effectiveCapacity * 2);
-  // Unused prompt slots must be label -1 ("not a point" in SAM's prompt
-  // encoder). Label 0 would be an ACTIVE background point at the top-left
-  // corner, dragging every mask toward it.
-  const pointLabels = new Float32Array(effectiveCapacity).fill(-1);
+  points: SamPoint[],
+  threshold: number,
+  logLabel: string,
+): Promise<{
+  binaryMask: Uint8Array;
+  maskWidth: number;
+  maskHeight: number;
+  score: number;
+}> {
+  const promptSlots = getPromptSlots(model);
+  const packed = points.slice(0, promptSlots);
 
-  effectivePoints.forEach((point, index) => {
-    pointCoords[index * 2] =
-      coordinateMode === "encoder-space" ? point.x * context.encoderWidth : point.x;
-    pointCoords[index * 2 + 1] =
-      coordinateMode === "encoder-space" ? point.y * context.encoderHeight : point.y;
-    pointLabels[index] = point.label;
+  const pointCoords = new Float32Array(promptSlots * 2);
+  packed.forEach((point, index) => {
+    pointCoords[index * 2] = point.x * context.contentWidth;
+    pointCoords[index * 2 + 1] = point.y * context.contentHeight;
   });
 
-  return { pointCoords, pointLabels };
+  // point_labels dtype varies by export: the Qualcomm AI Hub decoder uses
+  // FLOAT32, litert-torch/onnx exports emit INT64 (and some INT32). Feeding a
+  // Float32Array where the model expects int64 both misreads the values AND
+  // under-sizes the buffer (4 vs 8 bytes/elem), so match the declared dtype.
+  // 1 = foreground, 0 = background/negative, -1 = not-a-point pad.
+  const labelDataType = model.inputs[2]?.dataType;
+  let pointLabels: ArrayBufferView;
+  if (labelDataType === "int64") {
+    const labels = new BigInt64Array(promptSlots).fill(-1n);
+    packed.forEach((point, index) => (labels[index] = BigInt(point.label)));
+    pointLabels = labels;
+  } else if (labelDataType === "int32") {
+    const labels = new Int32Array(promptSlots).fill(-1);
+    packed.forEach((point, index) => (labels[index] = point.label));
+    pointLabels = labels;
+  } else {
+    const labels = new Float32Array(promptSlots).fill(-1);
+    packed.forEach((point, index) => (labels[index] = point.label));
+    pointLabels = labels;
+  }
+
+  logMediaSam("Decoder using 3-input path", {
+    logLabel,
+    packedPoints: packed,
+    labelDataType,
+    pointCoords: Array.from(pointCoords),
+    pointLabels: Array.from(
+      pointLabels as unknown as ArrayLike<number | bigint>,
+    ).map(String),
+  });
+
+  const rawOutputs = await runModelAsync(
+    model,
+    [
+      toExactArrayBuffer(embeddings),
+      toExactArrayBuffer(pointCoords),
+      toExactArrayBuffer(pointLabels),
+    ],
+    `SAM decoder (${logLabel})`,
+  );
+
+  const outputs = rawOutputs.map((output) => new Float32Array(output!));
+  const { logits, score } = selectMaskSlice(
+    outputs,
+    model.outputs.map((tensor) => tensor.shape),
+  );
+  logMediaSam("Decoder raw mask stats (3-input)", {
+    logLabel,
+    outputLengths: outputs.map((output) => output.length),
+    ...summarizeMaskValues(logits),
+    score,
+  });
+
+  const fullMask = toBinaryMask(logits, threshold);
+  const { mask, width, height } = cropMaskToContent(
+    fullMask,
+    SAM_MASK_SIZE,
+    SAM_MASK_SIZE,
+    context,
+  );
+
+  return { binaryMask: mask, maskWidth: width, maskHeight: height, score };
+}
+
+function combineMasksInPlace(
+  target: Uint8Array,
+  source: Uint8Array,
+  op: "union" | "subtract",
+): void {
+  for (let index = 0; index < target.length; index += 1) {
+    if (op === "union") {
+      if (source[index] === 1) target[index] = 1;
+    } else if (source[index] === 1) {
+      target[index] = 0;
+    }
+  }
 }
 
 function countMaskForegroundPixels(binaryMask: Uint8Array): number {
@@ -1121,67 +1551,130 @@ export async function decodeSamMask(
   });
 
   if (model.inputs.length === 3) {
-    // This MobileSAM decoder (point_coords[1,2,2]) is the standard SAM export:
-    // it expects point coords in the 1024x1024 ENCODER pixel frame, not
-    // normalized [0,1]. Feeding [0.5,0.5] reads as a top-left corner prompt and
-    // the model returns an all-foreground mask (min logit > 0). Scale by 1024.
-    const { pointCoords, pointLabels } = buildLiteSamPromptInputs(
-      model,
-      points,
-      context,
-      "encoder-space",
-    );
+    const promptSlots = getPromptSlots(model);
+    const positivePoints = points.filter((point) => point.label === 1);
 
-    logMediaSam("Decoder using 3-input path", {
-      coordinateMode: "encoder-space",
-      pointCoordsLength: pointCoords.length,
-      pointLabelsLength: pointLabels.length,
-      pointCoords: Array.from(pointCoords),
-      pointLabels: Array.from(pointLabels),
-    });
+    if (positivePoints.length === 0) {
+      logMediaSam("Decoder pipeline complete", {
+        elapsedMs: elapsedMs(startTime),
+        path: "3-input",
+        reason: "no positive points",
+      });
+      logSam(`Decoded in ${elapsedMs(startTime)}ms (no positive points)`);
+      return {
+        binaryMask: new Uint8Array(SAM_MASK_SIZE * SAM_MASK_SIZE),
+        maskWidth: SAM_MASK_SIZE,
+        maskHeight: SAM_MASK_SIZE,
+        polygon: [],
+        score: 0,
+      };
+    }
 
-    const rawOutputs = await runModelAsync(
-      model,
-      [
-        toExactArrayBuffer(embeddings),
-        toExactArrayBuffer(pointCoords),
-        toExactArrayBuffer(pointLabels),
-      ],
-      "MobileSAM decoder",
-    );
+    let combinedMask: Uint8Array;
+    let maskWidth: number;
+    let maskHeight: number;
+    let score: number;
+    let inferCalls: number;
+    let mode: string;
 
-    const outputs = rawOutputs.map((output) => new Float32Array(output!));
-    const { logits, score } = selectMaskSlice(outputs);
-    logMediaSam("Decoder raw mask stats (3-input)", {
-      outputLengths: outputs.map((output) => output.length),
-      ...summarizeMaskValues(logits),
-      score,
-    });
-    const binaryMask = toBinaryMask(logits, threshold);
+    if (points.length <= promptSlots) {
+      // Native multipoint: the model has enough slots to take every prompt
+      // point at once, so SAM reasons about them jointly in a single run.
+      // Points are ordered oldest-first; the decoder handles positive (label 1)
+      // and negative (label 0) points together.
+      const result = await decodeLiteSamPoints(
+        model,
+        embeddings,
+        context,
+        points,
+        threshold,
+        "native",
+      );
+      combinedMask = result.binaryMask;
+      maskWidth = result.maskWidth;
+      maskHeight = result.maskHeight;
+      score = result.score;
+      inferCalls = 1;
+      mode = `native x${points.length}`;
+    } else {
+      // More points than the model has slots: fall back to combining several
+      // native batches -- union each positive-point mask, then subtract each
+      // negative-point mask. Capped per label to bound latency.
+      const positives = positivePoints.slice(-MAX_PROMPT_POINTS_PER_LABEL);
+      const negatives = points
+        .filter((point) => point.label === 0)
+        .slice(-MAX_PROMPT_POINTS_PER_LABEL);
+      inferCalls = positives.length + negatives.length;
+      mode = `union ${positives.length}+/${negatives.length}-`;
+
+      let mask: Uint8Array | null = null;
+      let width = SAM_MASK_SIZE;
+      let height = SAM_MASK_SIZE;
+      let scoreSum = 0;
+      for (const point of positives) {
+        const result = await decodeLiteSamPoints(
+          model,
+          embeddings,
+          context,
+          [point],
+          threshold,
+          "positive",
+        );
+        if (mask == null) {
+          mask = result.binaryMask;
+          width = result.maskWidth;
+          height = result.maskHeight;
+        } else {
+          combineMasksInPlace(mask, result.binaryMask, "union");
+        }
+        scoreSum += result.score;
+      }
+      for (const point of negatives) {
+        const result = await decodeLiteSamPoints(
+          model,
+          embeddings,
+          context,
+          [point],
+          threshold,
+          "negative",
+        );
+        combineMasksInPlace(mask!, result.binaryMask, "subtract");
+      }
+      combinedMask = mask!;
+      maskWidth = width;
+      maskHeight = height;
+      score = scoreSum / positives.length;
+    }
+
     const polygon = maskToPolygon(
-      binaryMask,
-      SAM_MASK_SIZE,
-      SAM_MASK_SIZE,
+      combinedMask,
+      maskWidth,
+      maskHeight,
       context.originalWidth,
       context.originalHeight,
+      positivePoints,
     );
-    const foregroundPixels = countMaskForegroundPixels(binaryMask);
+    const foregroundPixels = countMaskForegroundPixels(combinedMask);
+    const totalMs = elapsedMs(startTime);
 
     logMediaSam("Decoder pipeline complete", {
-      elapsedMs: elapsedMs(startTime),
+      elapsedMs: totalMs,
       path: "3-input",
-      coordinateMode: "encoder-space",
-      outputLengths: outputs.map((output) => output.length),
+      mode,
       score,
       polygonPoints: polygon.length,
-      maskPixels: binaryMask.length,
+      maskPixels: combinedMask.length,
       foregroundPixels,
     });
+    logSam(
+      `Decoded in ${totalMs}ms (${mode}, ${inferCalls} infer, ` +
+        `score ${score.toFixed(2)}, ${polygon.length} poly pts)`,
+    );
 
     return {
-      binaryMask,
-      maskWidth: SAM_MASK_SIZE,
-      maskHeight: SAM_MASK_SIZE,
+      binaryMask: combinedMask,
+      maskWidth,
+      maskHeight,
       polygon,
       score,
     };
@@ -1198,8 +1691,8 @@ export async function decodeSamMask(
   const pointLabels = new Float32Array(paddedPointCount);
 
   points.forEach((point, index) => {
-    pointCoords[index * 2] = point.x * context.encoderWidth;
-    pointCoords[index * 2 + 1] = point.y * context.encoderHeight;
+    pointCoords[index * 2] = point.x * context.contentWidth;
+    pointCoords[index * 2 + 1] = point.y * context.contentHeight;
     pointLabels[index] = point.label;
   });
 
@@ -1237,7 +1730,10 @@ export async function decodeSamMask(
   );
 
   const outputs = rawOutputs.map((output) => new Float32Array(output!));
-  const { logits, score } = selectMaskSlice(outputs);
+  const { logits, score } = selectMaskSlice(
+    outputs,
+    model.outputs.map((tensor) => tensor.shape),
+  );
   const binaryMask = toBinaryMask(logits, threshold);
   const polygon = maskToPolygon(
     binaryMask,
@@ -1245,6 +1741,7 @@ export async function decodeSamMask(
     SAM_MASK_SIZE,
     context.originalWidth,
     context.originalHeight,
+    points.filter((point) => point.label === 1),
   );
 
   logMediaSam("Decoder pipeline complete", {

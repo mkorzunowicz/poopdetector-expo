@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Platform } from "react-native";
-import { useTensorflowModel } from "react-native-fast-tflite";
 import { useResizer } from "react-native-vision-camera-resizer";
+import { useCachedTensorflowModel } from "../tfliteModelCache";
 import { COCO_LABELS } from "../cocoLabels";
 import type { UseDetectorResult } from "./types";
 import { createYoloXNanoDetector } from "./yoloxNanoDetector";
@@ -32,15 +32,18 @@ export function useDetectorYoloXNanoPoop(
     return time;
   }, []);
 
-  // Try GPU first, fallback to CPU on error
+  // Try GPU first, fallback to CPU on error. Both load through the shared
+  // model cache (ai/tfliteModelCache.ts) so the photo-detail screen (media.tsx),
+  // which requests the same asset with delegates=[], reuses this CPU instance
+  // instead of re-loading the model from scratch.
   const [useFallback, setUseFallback] = useState(false);
 
-  const gpuModelHook = useTensorflowModel(
+  const gpuModelHook = useCachedTensorflowModel(
     modelAsset,
     Platform.OS === "ios" ? ["core-ml"] : ["android-gpu"],
   );
 
-  const cpuModelHook = useTensorflowModel(modelAsset, []);
+  const cpuModelHook = useCachedTensorflowModel(modelAsset, []);
 
   // Check if GPU failed and trigger CPU fallback
   useEffect(() => {

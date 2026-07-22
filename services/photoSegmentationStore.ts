@@ -1,7 +1,7 @@
 import * as FileSystem from "expo-file-system/legacy";
 
 import type { Detection } from "@/ai/detectors/types";
-import type { SamPoint } from "@/ai/mobileSamPhoto";
+import { VERBOSE_SAM_LOGS, type SamPoint } from "@/ai/mobileSamPhoto";
 
 export interface SavedPhotoSegmentation {
   photoPath: string;
@@ -21,6 +21,9 @@ const STORE_PATH = `${FileSystem.documentDirectory ?? ""}poopdetector-segmentati
 const STORE_TIMEOUT_MS = 600;
 
 function logPhotoStore(message: string, data?: Record<string, unknown>): void {
+  if (!VERBOSE_SAM_LOGS) {
+    return;
+  }
   if (data) {
     console.log(`[PhotoSegmentationStore] ${message}`, data);
     return;

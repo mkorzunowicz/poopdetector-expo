@@ -34,6 +34,12 @@ import { createSynchronizable, scheduleOnRN } from "react-native-worklets";
 
 import { DETECTOR_NAMES, DetectorName, useDetector } from "@/ai/detectors";
 import { Detection } from "@/ai/detectors/types";
+import {
+  DEFAULT_SAM_VARIANT_ID,
+  getSamVariant,
+  nextSamVariantId,
+  type SamVariantId,
+} from "@/ai/samModels";
 import { useFocusEffect } from "@react-navigation/core";
 
 import { CaptureButton } from "@/components/buttons/CaptureButton";
@@ -184,12 +190,27 @@ const CameraPage: React.FC = () => {
     setIsCameraStarted(false);
   }, []);
 
+  // Which SAM variant the media screen should segment captured photos with.
+  // Cycled via the selector button in the right control column.
+  const [samVariantId, setSamVariantId] = useState<SamVariantId>(
+    DEFAULT_SAM_VARIANT_ID,
+  );
+  const onCycleSamVariant = useCallback(() => {
+    setSamVariantId((current) => {
+      const next = nextSamVariantId(current);
+      console.log(`SAM variant selected: ${next}`);
+      return next;
+    });
+  }, []);
+
   const onMediaCaptured = useCallback(
     (filePath: string, type: "photo" | "video") => {
-      console.log(`Media captured! ${filePath}`);
-      router.push(`/media?path=${encodeURIComponent(filePath)}&type=${type}`);
+      console.log(`Media captured! ${filePath} (sam=${samVariantId})`);
+      router.push(
+        `/media?path=${encodeURIComponent(filePath)}&type=${type}&sam=${samVariantId}`,
+      );
     },
-    [],
+    [samVariantId],
   );
   const onFlipCameraPressed = useCallback(() => {
     setCameraPosition((p) => (p === "back" ? "front" : "back"));
@@ -628,6 +649,9 @@ const CameraPage: React.FC = () => {
             />
           </TouchableOpacity>
         )}
+        <TouchableOpacity style={styles.button} onPress={onCycleSamVariant}>
+          <Text style={styles.text}>{getSamVariant(samVariantId).shortLabel}</Text>
+        </TouchableOpacity>
         <TouchableOpacity
           style={styles.button}
           onPress={() => router.push("/devices")}
