@@ -2,6 +2,7 @@ import { ImageManipulator, SaveFormat } from "expo-image-manipulator";
 import type { TensorflowModel } from "react-native-fast-tflite";
 import { loadImage, type Image as NitroImage } from "react-native-nitro-image";
 
+import { markModelRunEnd, markModelRunStart } from "./tfliteModelCache";
 import type { Detection } from "./detectors/types";
 import { modelToString, toExactArrayBuffer } from "./detectors/types";
 
@@ -19,15 +20,19 @@ const SAM_MODEL_TIMEOUT_MS = 15000;
 const SAM_PAD_PIXEL_RGB: readonly [number, number, number] = [
   123.675, 116.28, 103.53,
 ];
-// The bundled 3-input decoder (point_coords[1,2,2]) is a TFLite export with a
-// FIXED, compile-time-baked shape: exactly one real point slot plus one
-// mandatory "not-a-point" pad slot. Confirmed via Netron AND runtime
+// Every bundled 3-input decoder (point_coords[1,N,2]) is a TFLite export with
+// a FIXED, compile-time-baked N (1 for the original MobileSAM export, 2 for
+// the litert-torch re-export and EdgeSAM). Confirmed via Netron AND runtime
 // model.inputs introspection. Unlike the reference C# app's ONNX decoder
 // (mask_input/has_mask_input/orig_im_size, dynamic point count), TFLite can't
-// accept a variable number of points in one call -- there is no N to extend.
-// We fan out extra taps into independent single-point decodes and combine
-// client-side instead, capped so a long tap history stays fast.
-const MAX_PROMPT_POINTS_PER_LABEL = 5;
+// accept a variable number of points in one call, so points beyond N are
+// fanned out into extra decoder runs and combined client-side (see
+// decodeSamMask). This cap is purely a pathological-latency safety valve --
+// normal interactive tapping never gets close to it -- so it's set high and
+// logs loudly if ever hit, rather than silently dropping points (a real bug
+// this cap previously caused at a much lower value: a 6th positive point
+// silently dropped the 1st).
+const MAX_PROMPT_POINTS_SAFETY_CAP = 24;
 
 type RawPixelFormat =
   | "ARGB"
@@ -740,9 +745,19 @@ async function runModelAsync(
     })),
   });
 
+  // The timeout below only makes THIS FUNCTION give up waiting -- it can't
+  // actually cancel model.run() on the native side. So track the real run
+  // promise's own completion (not the race) for markModelRunEnd, otherwise a
+  // timed-out-but-still-running call would look "idle" to the model cache and
+  // could get disposed mid-inference (a native use-after-free).
+  markModelRunStart(model);
+  const runPromise = model
+    .run(inputs)
+    .finally(() => markModelRunEnd(model));
+
   try {
     const result = await Promise.race<ArrayBuffer[]>([
-      model.run(inputs),
+      runPromise,
       new Promise<ArrayBuffer[]>((_, reject) => {
         setTimeout(
           () =>
@@ -1552,7 +1567,15 @@ export async function decodeSamMask(
 
   if (model.inputs.length === 3) {
     const promptSlots = getPromptSlots(model);
-    const positivePoints = points.filter((point) => point.label === 1);
+    let positivePoints = points.filter((point) => point.label === 1);
+    if (positivePoints.length > MAX_PROMPT_POINTS_SAFETY_CAP) {
+      logSam(
+        `WARNING: ${positivePoints.length} positive points exceeds the ` +
+          `safety cap (${MAX_PROMPT_POINTS_SAFETY_CAP}); dropping the oldest ` +
+          `${positivePoints.length - MAX_PROMPT_POINTS_SAFETY_CAP}.`,
+      );
+      positivePoints = positivePoints.slice(-MAX_PROMPT_POINTS_SAFETY_CAP);
+    }
 
     if (positivePoints.length === 0) {
       logMediaSam("Decoder pipeline complete", {
@@ -1598,28 +1621,51 @@ export async function decodeSamMask(
       mode = `native x${points.length}`;
     } else {
       // More points than the model has slots: fall back to combining several
-      // native batches -- union each positive-point mask, then subtract each
-      // negative-point mask. Capped per label to bound latency.
-      const positives = positivePoints.slice(-MAX_PROMPT_POINTS_PER_LABEL);
-      const negatives = points
-        .filter((point) => point.label === 0)
-        .slice(-MAX_PROMPT_POINTS_PER_LABEL);
-      inferCalls = positives.length + negatives.length;
-      mode = `union ${positives.length}+/${negatives.length}-`;
+      // decoder runs. Positive points are batched into promptSlots-sized
+      // native chunks (verified: e.g. 2 joint positive points correctly cover
+      // BOTH target regions in one call, not just the closer one) and unioned
+      // together -- this uses the model's real joint reasoning for every
+      // positive point, not just the first `promptSlots` of them. Negative
+      // points stay single-point-at-a-time (each real point + pad): a native
+      // decode with two negatives and NO positive anchor is a materially
+      // different, unverified query, so we don't risk it here. Every point
+      // the caller provides is processed -- none are silently dropped, unlike
+      // the old fixed 5-per-label cap.
+      let negativePoints = points.filter((point) => point.label === 0);
+      if (negativePoints.length > MAX_PROMPT_POINTS_SAFETY_CAP) {
+        logSam(
+          `WARNING: ${negativePoints.length} negative points exceeds the ` +
+            `safety cap (${MAX_PROMPT_POINTS_SAFETY_CAP}); dropping the oldest ` +
+            `${negativePoints.length - MAX_PROMPT_POINTS_SAFETY_CAP}.`,
+        );
+        negativePoints = negativePoints.slice(-MAX_PROMPT_POINTS_SAFETY_CAP);
+      }
+      inferCalls = 0;
+      mode = `batched ${positivePoints.length}+/${negativePoints.length}- (${promptSlots}/call+, 1/call-)`;
 
       let mask: Uint8Array | null = null;
       let width = SAM_MASK_SIZE;
       let height = SAM_MASK_SIZE;
       let scoreSum = 0;
-      for (const point of positives) {
+      let positiveBatchCount = 0;
+
+      for (
+        let start = 0;
+        start < positivePoints.length;
+        start += promptSlots
+      ) {
+        const batch = positivePoints.slice(start, start + promptSlots);
         const result = await decodeLiteSamPoints(
           model,
           embeddings,
           context,
-          [point],
+          batch,
           threshold,
-          "positive",
+          "positive-batch",
         );
+        inferCalls += 1;
+        positiveBatchCount += 1;
+        scoreSum += result.score;
         if (mask == null) {
           mask = result.binaryMask;
           width = result.maskWidth;
@@ -1627,9 +1673,8 @@ export async function decodeSamMask(
         } else {
           combineMasksInPlace(mask, result.binaryMask, "union");
         }
-        scoreSum += result.score;
       }
-      for (const point of negatives) {
+      for (const point of negativePoints) {
         const result = await decodeLiteSamPoints(
           model,
           embeddings,
@@ -1638,12 +1683,13 @@ export async function decodeSamMask(
           threshold,
           "negative",
         );
+        inferCalls += 1;
         combineMasksInPlace(mask!, result.binaryMask, "subtract");
       }
       combinedMask = mask!;
       maskWidth = width;
       maskHeight = height;
-      score = scoreSum / positives.length;
+      score = scoreSum / Math.max(1, positiveBatchCount);
     }
 
     const polygon = maskToPolygon(

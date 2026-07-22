@@ -11,7 +11,10 @@ import {
     type SamPoint,
 } from "@/ai/mobileSamPhoto";
 import { getSamVariant } from "@/ai/samModels";
-import { useCachedTensorflowModel } from "@/ai/tfliteModelCache";
+import {
+    useCachedTensorflowModel,
+    useTensorflowModelSlot,
+} from "@/ai/tfliteModelCache";
 import { SAFE_AREA_PADDING } from "@/components/Constants";
 import { tr } from "@/i18n/i18n";
 import {
@@ -49,10 +52,7 @@ import {
     TouchableOpacity,
     View,
 } from "react-native";
-import {
-    useTensorflowModel,
-    type TensorflowModelDelegate,
-} from "react-native-fast-tflite";
+import type { TensorflowModelDelegate } from "react-native-fast-tflite";
 import Svg, { Circle, Polygon, Rect } from "react-native-svg";
 
 const DETECTION_MODEL_ASSET = require("../assets/yolox_nano_poop_cropped_only_best_float32.tflite");
@@ -209,11 +209,23 @@ const MediaPage: React.FC = () => {
   // time a photo is captured and this screen mounts, this is a cache hit --
   // no ~900ms reload. See ai/tfliteModelCache.ts.
   const detectionModelHook = useCachedTensorflowModel(DETECTION_MODEL_ASSET, []);
-  const samEncoderHook = useTensorflowModel(
+  // Role-scoped: this screen fully unmounts/remounts on every photo capture,
+  // and SAM models are large (tens-hundreds of MB resident). Without explicit
+  // disposal, retaking a photo leaked the previous instance and eventually
+  // OOM-crashed the app. useTensorflowModelSlot reuses the already-loaded
+  // model when the same variant is picked again, and disposes the old one
+  // when switching variants, so at most one encoder + one decoder are ever
+  // resident. See ai/tfliteModelCache.ts.
+  const samEncoderHook = useTensorflowModelSlot(
+    "sam-encoder",
     samVariant.encoderAsset,
     samEncoderDelegates,
   );
-  const samDecoderHook = useTensorflowModel(samVariant.decoderAsset, []);
+  const samDecoderHook = useTensorflowModelSlot(
+    "sam-decoder",
+    samVariant.decoderAsset,
+    [],
+  );
 
   const detectionModel =
     detectionModelHook.state === "loaded" ? detectionModelHook.model : null;
