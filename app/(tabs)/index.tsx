@@ -554,6 +554,7 @@ const CameraPage: React.FC = () => {
         onStartRecording={startRecording}
         onStopRecording={stopRecording}
         enabled={isCameraConfigured && isActive}
+        photoOnly
       />
 
       <View style={{ position: "absolute", top: 130, left: 10, zIndex: 99 }}>

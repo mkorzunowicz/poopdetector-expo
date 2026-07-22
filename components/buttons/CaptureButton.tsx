@@ -22,6 +22,12 @@ interface Props extends ViewProps {
   onStartRecording: () => Promise<void>;
   onStopRecording: () => Promise<void>;
   enabled: boolean;
+  /**
+   * When true, video recording is disabled entirely: any press/release,
+   * regardless of hold duration, takes a photo. The long-press-to-record
+   * timer never fires.
+   */
+  photoOnly?: boolean;
 }
 
 const _CaptureButton: React.FC<Props> = ({
@@ -29,6 +35,7 @@ const _CaptureButton: React.FC<Props> = ({
   onStartRecording,
   onStopRecording,
   enabled,
+  photoOnly = false,
   style,
   ...props
 }): React.ReactElement => {
@@ -98,6 +105,7 @@ const _CaptureButton: React.FC<Props> = ({
           isPressingButton.value = true;
           const now = new Date();
           pressDownDate.current = now;
+          if (photoOnly) return;
           setTimeout(() => {
             if (pressDownDate.current === now) {
               // user is still pressing down after 200ms, so his intention is to create a video
@@ -116,8 +124,9 @@ const _CaptureButton: React.FC<Props> = ({
             const now = new Date();
             const diff = now.getTime() - pressDownDate.current.getTime();
             pressDownDate.current = undefined;
-            if (diff < START_RECORDING_DELAY) {
-              // user has released the button within 200ms, so his intention is to take a single picture.
+            if (photoOnly || diff < START_RECORDING_DELAY) {
+              // user has released the button within 200ms (or video is
+              // disabled entirely), so his intention is to take a single photo.
               await takePhoto();
             } else {
               // user has held the button for more than 200ms, so he has been recording this entire time.
@@ -134,7 +143,7 @@ const _CaptureButton: React.FC<Props> = ({
           break;
       }
     },
-    [isPressingButton, startRecording, stopRecording, takePhoto],
+    [isPressingButton, photoOnly, startRecording, stopRecording, takePhoto],
   );
   //#endregion
 
