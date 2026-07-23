@@ -8,8 +8,10 @@ import { modelToString, toExactArrayBuffer } from "./detectors/types";
 
 const YOLOX_NUM_BBOX_FIELDS = 5;
 const YOLOX_STRIDES = [8, 16, 32] as const;
-const SAM_ENCODER_SIZE = 1024;
-const SAM_MASK_SIZE = 256;
+// Exported: shared with ai/samOnnxNitro.ts, which packs the same 1024x1024 /
+// 256x256 canvas for the ONNX EdgeSAM pair.
+export const SAM_ENCODER_SIZE = 1024;
+export const SAM_MASK_SIZE = 256;
 const SAM_MODEL_TIMEOUT_MS = 15000;
 // Facebook SAM's pixel_mean (0-255 scale). The Qualcomm AI Hub MobileSAM export
 // pre-divides this by 255 and subtracts it inside the compiled encoder graph, so
@@ -17,24 +19,24 @@ const SAM_MODEL_TIMEOUT_MS = 15000;
 // normalize to exactly 0 -- matching both Qualcomm's qai_hub_models SAMApp
 // preprocessing AND the reference C# MobileSam implementation's aspect-preserving
 // resize + pad-to-1024 approach (AspectRatioResizer.cs / MobileSamImageProcessor.cs).
-const SAM_PAD_PIXEL_RGB: readonly [number, number, number] = [
+export const SAM_PAD_PIXEL_RGB: readonly [number, number, number] = [
   123.675, 116.28, 103.53,
 ];
-// Every bundled 3-input decoder (point_coords[1,N,2]) is a TFLite export with
-// a FIXED, compile-time-baked N (1 for the original MobileSAM export, 2 for
-// the litert-torch re-export and EdgeSAM). Confirmed via Netron AND runtime
-// model.inputs introspection. Unlike the reference C# app's ONNX decoder
-// (mask_input/has_mask_input/orig_im_size, dynamic point count), TFLite can't
-// accept a variable number of points in one call, so points beyond N are
-// fanned out into extra decoder runs and combined client-side (see
-// decodeSamMask). This cap is purely a pathological-latency safety valve --
-// normal interactive tapping never gets close to it -- so it's set high and
-// logs loudly if ever hit, rather than silently dropping points (a real bug
-// this cap previously caused at a much lower value: a 6th positive point
+// Every bundled 3-input TFLite decoder (point_coords[1,N,2]) has a FIXED,
+// compile-time-baked N (1 for the original MobileSAM export, 2 for the
+// litert-torch re-export and EdgeSAM-via-TFLite). Confirmed via Netron AND
+// runtime model.inputs introspection. Points beyond N are fanned out into
+// extra decoder runs and combined client-side (see decodeSamMask). The ONNX
+// EdgeSAM path (ai/samOnnxNitro.ts) has no such ceiling -- its decoder has a
+// genuine dynamic num_points axis -- but reuses this same constant as a
+// latency-only safety valve against a pathological number of taps. Set high
+// and logs loudly if ever hit, rather than silently dropping points (a real
+// bug this cap previously caused at a much lower value: a 6th positive point
 // silently dropped the 1st).
-const MAX_PROMPT_POINTS_SAFETY_CAP = 24;
+export const MAX_PROMPT_POINTS_SAFETY_CAP = 24;
 
-type RawPixelFormat =
+// Exported: shared with ai/samOnnxNitro.ts's NCHW packer.
+export type RawPixelFormat =
   | "ARGB"
   | "BGRA"
   | "ABGR"
@@ -115,14 +117,15 @@ export interface SamDecodeResult {
 
 export type SamEmbeddings = ArrayBuffer;
 
-type RawPixelDataLike = {
+// Exported: shared with ai/samOnnxNitro.ts's NCHW packer.
+export type RawPixelDataLike = {
   buffer: ArrayBuffer;
   width: number;
   height: number;
   pixelFormat: RawPixelFormat | string;
 };
 
-type SamProgressCallback = (message: string) => void | Promise<void>;
+export type SamProgressCallback = (message: string) => void | Promise<void>;
 
 const yoloxGridCache: Record<number, GridCoordinate[]> = {};
 
@@ -142,8 +145,9 @@ function logMediaSam(message: string, data?: Record<string, unknown>): void {
   console.log(`[MediaSAM] ${message}`);
 }
 
+// Exported: shared with ai/samOnnxNitro.ts so both runtimes log identically.
 // Always-on, one-line summary log (timings). Kept terse on purpose.
-function logSam(message: string, data?: Record<string, unknown>): void {
+export function logSam(message: string, data?: Record<string, unknown>): void {
   if (data) {
     console.log(`[SAM] ${message}`, data);
     return;
@@ -163,11 +167,12 @@ function logMediaSamError(
   console.error(`[MediaSAM] ${message}`, error);
 }
 
-function measureStart(): number {
+// Exported: shared with ai/samOnnxNitro.ts.
+export function measureStart(): number {
   return Date.now();
 }
 
-function elapsedMs(startTime: number): number {
+export function elapsedMs(startTime: number): number {
   return Date.now() - startTime;
 }
 
@@ -255,7 +260,8 @@ function rgbIndices(
   }
 }
 
-function resolveRgbIndices(
+// Exported: shared with ai/samOnnxNitro.ts's NCHW packer.
+export function resolveRgbIndices(
   pixelFormat: RawPixelFormat,
   bytesPerPixel: number,
 ): [number, number, number, number] {
@@ -635,7 +641,9 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-async function resizeForSamEncoder(
+// Exported: reused as-is by ai/samOnnxNitro.ts's ONNX encode path -- this
+// resize step is purely NitroImage + geometry, no TFLite coupling at all.
+export async function resizeForSamEncoder(
   image: NitroImage,
   geometry: SamPreprocessing["geometry"],
 ): Promise<{ image: NitroImage; context: SamEncoderContext }> {
@@ -794,7 +802,8 @@ async function runModelAsync(
   }
 }
 
-async function reportSamProgress(
+// Exported: shared with ai/samOnnxNitro.ts.
+export async function reportSamProgress(
   onProgress: SamProgressCallback | undefined,
   message: string,
 ): Promise<void> {
@@ -895,7 +904,9 @@ export async function encodePhotoForSam(
   };
 }
 
-function selectMaskSlice(
+// Exported: reused as-is by ai/samOnnxNitro.ts -- generic over plain
+// Float32Array outputs, no TFLite coupling.
+export function selectMaskSlice(
   outputs: Float32Array[],
   // Declared output shapes from model.outputs, index-aligned with `outputs`.
   // Used to detect channel-last multi-mask layouts; optional for callers that
@@ -986,7 +997,11 @@ function sigmoid(value: number): number {
   return 1 / (1 + Math.exp(-value));
 }
 
-function toBinaryMask(logits: Float32Array, threshold: number): Uint8Array {
+// Exported: reused as-is by ai/samOnnxNitro.ts.
+export function toBinaryMask(
+  logits: Float32Array,
+  threshold: number,
+): Uint8Array {
   const binary = new Uint8Array(logits.length);
   for (let index = 0; index < logits.length; index += 1) {
     binary[index] = sigmoid(logits[index]!) >= threshold ? 1 : 0;
@@ -997,7 +1012,8 @@ function toBinaryMask(logits: Float32Array, threshold: number): Uint8Array {
 // Diagnostic: is the decoder emitting raw logits (mix of +/-) or already-sigmoided
 // probabilities (all in [0,1])? If min >= 0 the values are probabilities and the
 // extra sigmoid() in toBinaryMask marks nearly every pixel as foreground.
-function summarizeMaskValues(values: Float32Array): {
+// Exported: reused as-is by ai/samOnnxNitro.ts.
+export function summarizeMaskValues(values: Float32Array): {
   min: number;
   max: number;
   mean: number;
@@ -1331,7 +1347,8 @@ function simplifyPolygon(
   return [...left.slice(0, -1), ...right];
 }
 
-function maskToPolygon(
+// Exported: reused as-is by ai/samOnnxNitro.ts.
+export function maskToPolygon(
   binaryMask: Uint8Array,
   maskWidth: number,
   maskHeight: number,
@@ -1369,7 +1386,8 @@ function maskToPolygon(
 // region so downstream code (maskToPolygon, the UI's row-run renderer) can
 // keep mapping mask-space directly to original-image-space via a simple
 // width/height ratio, exactly as if no padding ever existed.
-function cropMaskToContent(
+// Exported: reused as-is by ai/samOnnxNitro.ts.
+export function cropMaskToContent(
   mask: Uint8Array,
   canvasWidth: number,
   canvasHeight: number,
@@ -1536,7 +1554,8 @@ function combineMasksInPlace(
   }
 }
 
-function countMaskForegroundPixels(binaryMask: Uint8Array): number {
+// Exported: reused as-is by ai/samOnnxNitro.ts.
+export function countMaskForegroundPixels(binaryMask: Uint8Array): number {
   let foregroundCount = 0;
   for (let index = 0; index < binaryMask.length; index += 1) {
     foregroundCount += binaryMask[index] ?? 0;

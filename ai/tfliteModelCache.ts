@@ -193,11 +193,18 @@ function loadIntoRoleSlot(
  * finishes loading -- use this for large, swappable models (e.g. SAM encoder/
  * decoder variants) where holding onto stale instances risks OOM. Requesting
  * the same model again reuses the already-loaded instance.
+ *
+ * Pass `enabled: false` to skip loading entirely (still returns the
+ * "loading" shape) -- used when this role isn't the active SAM runtime, so
+ * both this and ai/onnxModelCache.ts's useOnnxModelSlot can be called
+ * unconditionally every render (required by rules of hooks) without
+ * wastefully loading a model that isn't selected.
  */
 export function useTensorflowModelSlot(
   role: string,
   source: ModelSource,
   delegates: TensorflowModelDelegate[],
+  enabled = true,
 ): TensorflowPlugin {
   const [state, setState] = useState<TensorflowPlugin>({
     model: undefined,
@@ -205,6 +212,10 @@ export function useTensorflowModelSlot(
   });
 
   useEffect(() => {
+    if (!enabled) {
+      setState({ model: undefined, state: "loading" });
+      return;
+    }
     let cancelled = false;
     setState({ model: undefined, state: "loading" });
     loadIntoRoleSlot(role, source, delegates)
@@ -220,7 +231,7 @@ export function useTensorflowModelSlot(
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [role, source, JSON.stringify(delegates)]);
+  }, [role, source, JSON.stringify(delegates), enabled]);
 
   return state;
 }

@@ -203,14 +203,28 @@ const CameraPage: React.FC = () => {
     });
   }, []);
 
+  // CPU/GPU choice for the detector and for whichever SAM runtime is active.
+  // detectorUseGpu drives the LIVE detector below (useDetector) directly, so
+  // toggling it changes frame-processor behavior on this screen immediately.
+  // Both also get passed to the media/photo screen for its own (separate)
+  // detector + SAM model instances, so the effect of switching is easy to
+  // compare by capturing twice with the setting flipped. Both default to
+  // CPU, matching this app's settled default after repeated A/B testing (GPU
+  // delegates measured slower, and for ONNX CoreML even less accurate, than
+  // CPU).
+  const [detectorUseGpu, setDetectorUseGpu] = useState(false);
+  const [samUseGpu, setSamUseGpu] = useState(false);
+
   const onMediaCaptured = useCallback(
     (filePath: string, type: "photo" | "video") => {
-      console.log(`Media captured! ${filePath} (sam=${samVariantId})`);
+      console.log(
+        `Media captured! ${filePath} (sam=${samVariantId}, detectorGpu=${detectorUseGpu}, samGpu=${samUseGpu})`,
+      );
       router.push(
-        `/media?path=${encodeURIComponent(filePath)}&type=${type}&sam=${samVariantId}`,
+        `/media?path=${encodeURIComponent(filePath)}&type=${type}&sam=${samVariantId}&detectorGpu=${detectorUseGpu ? "1" : "0"}&samGpu=${samUseGpu ? "1" : "0"}`,
       );
     },
-    [samVariantId],
+    [samVariantId, detectorUseGpu, samUseGpu],
   );
   const onFlipCameraPressed = useCallback(() => {
     setCameraPosition((p) => (p === "back" ? "front" : "back"));
@@ -275,7 +289,7 @@ const CameraPage: React.FC = () => {
   const [detections, setDetections] = useState<Detection[]>([]);
 
   const [selected, setSelected] = useState<DetectorName>("poop-yolox-nano");
-  const { detect, ready } = useDetector(selected);
+  const { detect, ready } = useDetector(selected, detectorUseGpu);
 
   // Adaptive FPS based on detection performance
   const [adaptiveTargetFps, setAdaptiveTargetFps] = useState(3);
@@ -652,6 +666,18 @@ const CameraPage: React.FC = () => {
         )}
         <TouchableOpacity style={styles.button} onPress={onCycleSamVariant}>
           <Text style={styles.text}>{getSamVariant(samVariantId).shortLabel}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.button}
+          onPress={() => setDetectorUseGpu((value) => !value)}
+        >
+          <Text style={styles.text}>{`Det\n${detectorUseGpu ? "GPU" : "CPU"}`}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.button}
+          onPress={() => setSamUseGpu((value) => !value)}
+        >
+          <Text style={styles.text}>{`SAM\n${samUseGpu ? "GPU" : "CPU"}`}</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.button}

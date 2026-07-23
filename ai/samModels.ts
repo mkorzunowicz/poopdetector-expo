@@ -5,14 +5,12 @@ import type { SamPreprocessing } from "./mobileSamPhoto";
  * photo screen can run. Each entry's preprocessing convention was traced to a
  * proven reference implementation -- see SamPreprocessing in mobileSamPhoto.ts.
  *
- * EdgeSAM ships in float32 and float16 flavors of the same export (weights
- * precision only -- identical I/O contract and preprocessing).
+ * Only confirmed-working pairs are listed here. Dropped: the original
+ * Qualcomm AI Hub MobileSAM export (superseded by the litert-torch
+ * re-export below) and the EdgeSAM TFLite re-exports (f32/f16 -- both
+ * numerically broken, see ai/samModels.ts git history / memory).
  */
-export type SamVariantId =
-  | "mobilesam"
-  | "mobilesam-new"
-  | "edgesam-f32"
-  | "edgesam-f16";
+export type SamVariantId = "mobilesam-new" | "edgesam-onnx-nitro";
 
 export interface SamVariant {
   id: SamVariantId;
@@ -20,24 +18,24 @@ export interface SamVariant {
   name: string;
   /** Compact label for the camera-screen selector button. */
   shortLabel: string;
+  /**
+   * Which inference engine loads encoderAsset/decoderAsset. "tflite" goes
+   * through ai/tfliteModelCache.ts + ai/mobileSamPhoto.ts; "onnx-nitro" goes
+   * through ai/onnxModelCache.ts + ai/samOnnxNitro.ts (react-native-nitro-
+   * onnxruntime) -- runs the ONNX model directly, no TFLite re-export step,
+   * with a genuine dynamic-shape multipoint decoder.
+   */
+  runtime: "tflite" | "onnx-nitro";
   encoderAsset: number;
   decoderAsset: number;
   preprocessing: SamPreprocessing;
 }
 
-// MobileSAM (Qualcomm AI Hub export): letterbox + [0,1] values (mean/std pre-
-// divided by 255 inside that graph).
-const MOBILESAM_PREPROCESSING: SamPreprocessing = {
-  geometry: "letterbox",
-  mean: [0, 0, 0],
-  std: [255, 255, 255],
-};
-
 // MobileSAM litert-torch re-export: the Colab EncoderHWC wrapper bakes
 // (x - [123.675,116.28,103.53]) / [58.395,57.12,57.375] for x in RAW [0,255],
 // so RN must feed raw bytes unchanged (mean 0, std 1). Verified locally: raw
 // [0,255] -> IoU 1.00, [0,1] -> 0.97 (only that high because the test scene is
-// high-contrast). Same letterbox geometry (ResizeLongestSide-trained ViT).
+// high-contrast). Letterbox geometry (ResizeLongestSide-trained ViT).
 const MOBILESAM_NEW_PREPROCESSING: SamPreprocessing = {
   geometry: "letterbox",
   mean: [0, 0, 0],
@@ -55,47 +53,33 @@ const EDGESAM_PREPROCESSING: SamPreprocessing = {
 
 export const SAM_VARIANTS: SamVariant[] = [
   {
-    id: "mobilesam",
-    name: "MobileSAM",
-    shortLabel: "M-SAM",
-    encoderAsset: require("../assets/mobilesam-samencoder.tflite"),
-    decoderAsset: require("../assets/mobilesam-samdecoder.tflite"),
-    preprocessing: MOBILESAM_PREPROCESSING,
-  },
-  {
-    // litert-torch re-export. Local harness verdict (scratchpad): the ENCODER
-    // is good (IoU 0.97 paired with the old decoder), but the DECODER export
-    // is broken -- its point-prompt path is dead (identical all-foreground
-    // mask regardless of tap location), so this pair produces garbage until
-    // the decoder is re-exported. Its point_labels input is INT64 (handled in
-    // decodeSingleLiteSamPoint). Same [0,1] letterbox preprocessing as the
-    // original MobileSAM (same architecture, re-exported).
+    // litert-torch re-export. Confirmed working on-device (iOS + Android).
+    // Its point_labels input is INT64 (handled in decodeLiteSamPoints).
     id: "mobilesam-new",
     name: "MobileSAM (new)",
     shortLabel: "M-SAM\nnew",
+    runtime: "tflite",
     encoderAsset: require("../assets/mobilesam_encoder_new.tflite"),
     decoderAsset: require("../assets/mobilesam_decoder_new.tflite"),
     preprocessing: MOBILESAM_NEW_PREPROCESSING,
   },
   {
-    id: "edgesam-f32",
-    name: "EdgeSAM f32",
-    shortLabel: "E-SAM\n32",
-    encoderAsset: require("../assets/edge_sam_3x_encoder_float32.tflite"),
-    decoderAsset: require("../assets/edge_sam_3x_decoder_static_float32.tflite"),
-    preprocessing: EDGESAM_PREPROCESSING,
-  },
-  {
-    id: "edgesam-f16",
-    name: "EdgeSAM f16",
-    shortLabel: "E-SAM\n16",
-    encoderAsset: require("../assets/edge_sam_3x_encoder_float16.tflite"),
-    decoderAsset: require("../assets/edge_sam_3x_decoder_static_float16.tflite"),
+    // Runs the ONNX model directly via react-native-nitro-onnxruntime -- no
+    // TFLite re-export step. Local verification (scratchpad, onnxruntime):
+    // single-point IoU 1.00, and genuine NATIVE 2-3 point multipoint (one
+    // decoder call, dynamic num_points axis) correctly covers all target
+    // regions jointly -- something no TFLite export here can do.
+    id: "edgesam-onnx-nitro",
+    name: "EdgeSAM (ONNX)",
+    shortLabel: "E-SAM\nONNX",
+    runtime: "onnx-nitro",
+    encoderAsset: require("../assets/edge_sam_3x_encoder.onnx"),
+    decoderAsset: require("../assets/edge_sam_3x_decoder.onnx"),
     preprocessing: EDGESAM_PREPROCESSING,
   },
 ];
 
-export const DEFAULT_SAM_VARIANT_ID: SamVariantId = "mobilesam";
+export const DEFAULT_SAM_VARIANT_ID: SamVariantId = "mobilesam-new";
 
 export function getSamVariant(id: string | undefined | null): SamVariant {
   return (

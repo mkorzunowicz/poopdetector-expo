@@ -1,26 +1,28 @@
 import { type Detection } from "@/ai/detectors/types";
 import {
-    decodeSamMask,
-    detectPoopInPhoto,
-    encodePhotoForSam,
-    getInitialSamPoint,
-    loadPhotoImage,
-    toFileUri,
-    VERBOSE_SAM_LOGS,
-    type SamEmbeddings,
-    type SamPoint,
+  decodeSamMask,
+  detectPoopInPhoto,
+  encodePhotoForSam,
+  getInitialSamPoint,
+  loadPhotoImage,
+  toFileUri,
+  VERBOSE_SAM_LOGS,
+  type SamEmbeddings,
+  type SamPoint,
 } from "@/ai/mobileSamPhoto";
+import { useOnnxModelSlot } from "@/ai/onnxModelCache";
 import { getSamVariant } from "@/ai/samModels";
+import { decodeSamMaskOnnx, encodePhotoForSamOnnx } from "@/ai/samOnnxNitro";
 import {
-    useCachedTensorflowModel,
-    useTensorflowModelSlot,
+  useCachedTensorflowModel,
+  useTensorflowModelSlot,
 } from "@/ai/tfliteModelCache";
 import { SAFE_AREA_PADDING } from "@/components/Constants";
 import { tr } from "@/i18n/i18n";
 import {
-    attachPhotoSegmentationAssetId,
-    getPhotoSegmentation,
-    savePhotoSegmentation,
+  attachPhotoSegmentationAssetId,
+  getPhotoSegmentation,
+  savePhotoSegmentation,
 } from "@/services/photoSegmentationStore";
 import { useTheme } from "@/styles/ThemeContext";
 import { Ionicons } from "@expo/vector-icons";
@@ -32,27 +34,25 @@ import { Image } from "expo-image";
 import * as MediaLibrary from "expo-media-library";
 import { router, useLocalSearchParams } from "expo-router";
 import React, {
-    useCallback,
-    useEffect,
-    useMemo,
-    useRef,
-    useState,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
 } from "react";
-import type {
-    GestureResponderEvent,
-    LayoutChangeEvent,
-} from "react-native";
+import type { GestureResponderEvent, LayoutChangeEvent } from "react-native";
 import {
-    ActivityIndicator,
-    Alert,
-    Platform,
-    Pressable,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View,
+  ActivityIndicator,
+  Alert,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from "react-native";
 import type { TensorflowModelDelegate } from "react-native-fast-tflite";
+import type { SessionOptions } from "react-native-nitro-onnxruntime";
 import Svg, { Circle, Polygon, Rect } from "react-native-svg";
 
 const DETECTION_MODEL_ASSET = require("../assets/yolox_nano_poop_cropped_only_best_float32.tflite");
@@ -114,10 +114,29 @@ function formatModelLoadInfo(model: {
   inputs: readonly { dataType: string; shape: readonly number[] }[];
   outputs: readonly { dataType: string; shape: readonly number[] }[];
 }): string {
-  const delegate = model.delegates.length > 0 ? model.delegates.join("+") : "cpu";
-  const fmt = (tensors: readonly { dataType: string; shape: readonly number[] }[]) =>
-    tensors.map((t) => `${t.dataType}[${t.shape.join(",")}]`).join(", ");
+  const delegate =
+    model.delegates.length > 0 ? model.delegates.join("+") : "cpu";
+  const fmt = (
+    tensors: readonly { dataType: string; shape: readonly number[] }[],
+  ) => tensors.map((t) => `${t.dataType}[${t.shape.join(",")}]`).join(", ");
   return `(${delegate}) in [${fmt(model.inputs)}] out [${fmt(model.outputs)}]`;
+}
+
+// Same idea as formatModelLoadInfo, but for react-native-nitro-onnxruntime's
+// InferenceSession -- its Tensor shape is {name, type, dims} rather than
+// TFLite's {name, dataType, shape}. `providerLabel` reflects what execution
+// provider was REQUESTED at session creation (not necessarily what ORT
+// actually used per-op internally -- that's up to its own per-node fallback).
+function formatOnnxModelLoadInfo(
+  session: {
+    inputNames: readonly { type: string; dims: readonly number[] }[];
+    outputNames: readonly { type: string; dims: readonly number[] }[];
+  },
+  providerLabel: string,
+): string {
+  const fmt = (tensors: readonly { type: string; dims: readonly number[] }[]) =>
+    tensors.map((t) => `${t.type}[${t.dims.join(",")}]`).join(", ");
+  return `(${providerLabel}) in [${fmt(session.inputNames)}] out [${fmt(session.outputNames)}]`;
 }
 
 // Always-on one-line summary (model load / bootstrap timings).
@@ -142,10 +161,12 @@ function logMediaSamUiError(
 }
 
 const MediaPage: React.FC = () => {
-  const { path, type, sam } = useLocalSearchParams<{
+  const { path, type, sam, detectorGpu, samGpu } = useLocalSearchParams<{
     path: string;
     type: "photo" | "video";
     sam?: string;
+    detectorGpu?: string;
+    samGpu?: string;
   }>();
   // Which SAM pair to run -- chosen on the camera screen before capture and
   // passed along; falls back to the default variant for older links.
@@ -173,6 +194,15 @@ const MediaPage: React.FC = () => {
   const [maskScore, setMaskScore] = useState<number | null>(null);
   const [statusText, setStatusText] = useState<string>("Loading models...");
   const [errorText, setErrorText] = useState<string | null>(null);
+  // Debug A/B: force the detector and/or the active SAM runtime (whichever
+  // one -- TFLite or ONNX -- samVariant.runtime picks) onto the platform
+  // GPU/NPU delegate instead of CPU. Chosen on the camera screen before
+  // capture (like samVariant above), not toggled here -- both default to
+  // CPU, matching the delegates this app has settled on after repeated A/B
+  // testing (GPU delegates measured slower, and for ONNX CoreML even less
+  // accurate, than CPU for these models -- see memory).
+  const detectorUseGpu = detectorGpu === "1";
+  const samUseGpu = samGpu === "1";
   const { theme } = useTheme();
 
   const photoRef = useRef<Awaited<ReturnType<typeof loadPhotoImage>> | null>(
@@ -188,13 +218,14 @@ const MediaPage: React.FC = () => {
   // hooks below, so each logs its own elapsed-since-mount when it goes ready.
   const loadStartRef = useRef(Date.now());
 
-  // GPU-accelerate the SAM encoder -- it's the multi-second bottleneck (a
-  // 1024x1024 ViT). iOS -> Core ML, Android -> GPU delegate; both fall back to
-  // CPU per-unsupported-op automatically. Detection stays CPU (proven, and it's
-  // a separate frame path). Decoder stays CPU too: its point_labels are INT64,
-  // which GPU delegates generally don't support, so a delegate there would just
-  // fall back anyway (and it's already ~0.5s). Flip to [] to A/B against CPU.
-  const samEncoderDelegates = useMemo<TensorflowModelDelegate[]>(
+  // Platform GPU/NPU delegate ids, reused by both debug toggles below. iOS ->
+  // Core ML, Android -> GPU delegate (TFLite) / NNAPI (ONNX); both fall back
+  // to CPU per-unsupported-op automatically. Repeated A/B testing settled on
+  // CPU as the default for both the detector and every SAM path (GPU
+  // delegates measured slower, and for ONNX CoreML even less accurate, than
+  // CPU -- see memory) -- these toggles exist to re-verify that per device
+  // without a code change.
+  const tfliteGpuDelegates = useMemo<TensorflowModelDelegate[]>(
     () =>
       Platform.OS === "ios"
         ? ["core-ml"]
@@ -203,36 +234,80 @@ const MediaPage: React.FC = () => {
           : [],
     [],
   );
+  const onnxGpuProviderOptions = useMemo<SessionOptions | undefined>(
+    () =>
+      Platform.OS === "ios"
+        ? { executionProviders: [{ name: "coreml" }] }
+        : Platform.OS === "android"
+          ? { executionProviders: [{ name: "nnapi" }] }
+          : undefined,
+    [],
+  );
 
   // Cached: the camera screen (useDetectorYoloXNanoPoop) already loads this
-  // exact asset with delegates=[] as its CPU-fallback instance, so by the
-  // time a photo is captured and this screen mounts, this is a cache hit --
-  // no ~900ms reload. See ai/tfliteModelCache.ts.
-  const detectionModelHook = useCachedTensorflowModel(DETECTION_MODEL_ASSET, []);
+  // exact asset with delegates=[] (CPU) AND with the GPU delegate as its own
+  // two cached instances, so whichever this toggle picks is very likely
+  // already a cache hit by the time a photo is captured. See
+  // ai/tfliteModelCache.ts.
+  const detectionModelHook = useCachedTensorflowModel(
+    DETECTION_MODEL_ASSET,
+    detectorUseGpu ? tfliteGpuDelegates : [],
+  );
+  const isOnnxRuntime = samVariant.runtime === "onnx-nitro";
   // Role-scoped: this screen fully unmounts/remounts on every photo capture,
   // and SAM models are large (tens-hundreds of MB resident). Without explicit
   // disposal, retaking a photo leaked the previous instance and eventually
-  // OOM-crashed the app. useTensorflowModelSlot reuses the already-loaded
-  // model when the same variant is picked again, and disposes the old one
-  // when switching variants, so at most one encoder + one decoder are ever
-  // resident. See ai/tfliteModelCache.ts.
-  const samEncoderHook = useTensorflowModelSlot(
+  // OOM-crashed the app. useTensorflowModelSlot/useOnnxModelSlot reuse the
+  // already-loaded model when the same variant is picked again, and dispose
+  // the old one when switching variants, so at most one encoder + one decoder
+  // are ever resident. See ai/tfliteModelCache.ts / ai/onnxModelCache.ts.
+  //
+  // Both TFLite and ONNX slots are called unconditionally every render (rules
+  // of hooks) with `enabled` gating the actual load to whichever runtime the
+  // selected variant needs.
+  const samTfliteDelegates = samUseGpu ? tfliteGpuDelegates : [];
+  const samEncoderTfliteHook = useTensorflowModelSlot(
     "sam-encoder",
     samVariant.encoderAsset,
-    samEncoderDelegates,
+    samTfliteDelegates,
+    !isOnnxRuntime,
   );
-  const samDecoderHook = useTensorflowModelSlot(
+  const samDecoderTfliteHook = useTensorflowModelSlot(
     "sam-decoder",
     samVariant.decoderAsset,
-    [],
+    samTfliteDelegates,
+    !isOnnxRuntime,
+  );
+  const samOnnxProviderOptions = samUseGpu ? onnxGpuProviderOptions : undefined;
+  const samEncoderOnnxHook = useOnnxModelSlot(
+    "sam-encoder-onnx",
+    samVariant.encoderAsset,
+    samOnnxProviderOptions,
+    isOnnxRuntime,
+  );
+  const samDecoderOnnxHook = useOnnxModelSlot(
+    "sam-decoder-onnx",
+    samVariant.decoderAsset,
+    samOnnxProviderOptions,
+    isOnnxRuntime,
   );
 
   const detectionModel =
     detectionModelHook.state === "loaded" ? detectionModelHook.model : null;
   const samEncoderModel =
-    samEncoderHook.state === "loaded" ? samEncoderHook.model : null;
+    samEncoderTfliteHook.state === "loaded" ? samEncoderTfliteHook.model : null;
   const samDecoderModel =
-    samDecoderHook.state === "loaded" ? samDecoderHook.model : null;
+    samDecoderTfliteHook.state === "loaded" ? samDecoderTfliteHook.model : null;
+  const samEncoderModelOnnx =
+    samEncoderOnnxHook.state === "loaded" ? samEncoderOnnxHook.model : null;
+  const samDecoderModelOnnx =
+    samDecoderOnnxHook.state === "loaded" ? samDecoderOnnxHook.model : null;
+  const samEncoderReady = isOnnxRuntime
+    ? samEncoderModelOnnx != null
+    : samEncoderModel != null;
+  const samDecoderReady = isOnnxRuntime
+    ? samDecoderModelOnnx != null
+    : samDecoderModel != null;
 
   useEffect(() => {
     if (detectionModel) {
@@ -261,6 +336,32 @@ const MediaPage: React.FC = () => {
     }
   }, [samDecoderModel, samVariant.name]);
 
+  const onnxProviderLabel = samOnnxProviderOptions?.executionProviders?.length
+    ? samOnnxProviderOptions.executionProviders
+        .map((provider) =>
+          typeof provider === "string" ? provider : provider.name,
+        )
+        .join("+")
+    : "onnx-cpu";
+
+  useEffect(() => {
+    if (samEncoderModelOnnx) {
+      logSamUi(
+        `${samVariant.name} encoder loaded in ${Date.now() - loadStartRef.current}ms ` +
+          formatOnnxModelLoadInfo(samEncoderModelOnnx, onnxProviderLabel),
+      );
+    }
+  }, [samEncoderModelOnnx, samVariant.name, onnxProviderLabel]);
+
+  useEffect(() => {
+    if (samDecoderModelOnnx) {
+      logSamUi(
+        `${samVariant.name} decoder loaded in ${Date.now() - loadStartRef.current}ms ` +
+          formatOnnxModelLoadInfo(samDecoderModelOnnx, onnxProviderLabel),
+      );
+    }
+  }, [samDecoderModelOnnx, samVariant.name, onnxProviderLabel]);
+
   useFocusEffect(
     useCallback(() => {
       setIsScreenFocused(true);
@@ -288,7 +389,7 @@ const MediaPage: React.FC = () => {
     setMaskScore(null);
     setStatusText("Loading models...");
     setErrorText(null);
-  }, [path, type, sam]);
+  }, [path, type, sam, detectorUseGpu, samUseGpu]);
 
   // Prefer the orientation-normalized copy once bootstrap has produced it; fall
   // back to the original file until then (the loading overlay hides the swap).
@@ -311,12 +412,18 @@ const MediaPage: React.FC = () => {
       photoSize.width,
     ],
   );
+  const samEncoderErrored = isOnnxRuntime
+    ? samEncoderOnnxHook.state === "error"
+    : samEncoderTfliteHook.state === "error";
+  const samDecoderErrored = isOnnxRuntime
+    ? samDecoderOnnxHook.state === "error"
+    : samDecoderTfliteHook.state === "error";
   const modelError =
     detectionModelHook.state === "error"
       ? "Failed to load poop detection model."
-      : samEncoderHook.state === "error"
+      : samEncoderErrored
         ? `Failed to load ${samVariant.name} encoder model.`
-        : samDecoderHook.state === "error"
+        : samDecoderErrored
           ? `Failed to load ${samVariant.name} decoder model.`
           : null;
 
@@ -360,12 +467,12 @@ const MediaPage: React.FC = () => {
   const runSegmentation = useCallback(
     async (nextPoints: SamPoint[]) => {
       if (
-        !samDecoderModel ||
+        !samDecoderReady ||
         !embeddingsRef.current ||
         !encoderContextRef.current
       ) {
         logMediaSamUi("runSegmentation skipped", {
-          hasDecoderModel: samDecoderModel != null,
+          hasDecoderModel: samDecoderReady,
           hasEmbeddings: embeddingsRef.current != null,
           hasEncoderContext: encoderContextRef.current != null,
         });
@@ -396,12 +503,19 @@ const MediaPage: React.FC = () => {
 
         setStatusText("Decoding SAM mask...");
         await yieldToUi();
-        const result = await decodeSamMask(
-          samDecoderModel,
-          embeddingsRef.current,
-          encoderContextRef.current,
-          nextPoints,
-        );
+        const result = isOnnxRuntime
+          ? await decodeSamMaskOnnx(
+              samDecoderModelOnnx!,
+              embeddingsRef.current,
+              encoderContextRef.current,
+              nextPoints,
+            )
+          : await decodeSamMask(
+              samDecoderModel!,
+              embeddingsRef.current,
+              encoderContextRef.current,
+              nextPoints,
+            );
         setMaskData({
           binaryMask: result.binaryMask,
           maskWidth: result.maskWidth,
@@ -435,7 +549,13 @@ const MediaPage: React.FC = () => {
         setIsDecoding(false);
       }
     },
-    [persistSegmentation, samDecoderModel],
+    [
+      isOnnxRuntime,
+      persistSegmentation,
+      samDecoderModel,
+      samDecoderModelOnnx,
+      samDecoderReady,
+    ],
   );
 
   useEffect(() => {
@@ -445,8 +565,8 @@ const MediaPage: React.FC = () => {
       !hasMediaLoaded ||
       !isScreenFocused ||
       !detectionModel ||
-      !samEncoderModel ||
-      !samDecoderModel ||
+      !samEncoderReady ||
+      !samDecoderReady ||
       hasBootstrappedRef.current
     ) {
       return;
@@ -482,15 +602,23 @@ const MediaPage: React.FC = () => {
 
         setStatusText(`Encoding ${samVariant.name}...`);
         await yieldToUi();
-        const { embeddings, context } = await encodePhotoForSam(
-          samEncoderModel,
-          photo.image,
-          samVariant.preprocessing,
-          async (message) => {
-            setStatusText(message);
-            await yieldToUi();
-          },
-        );
+        const onEncodeProgress = async (message: string) => {
+          setStatusText(message);
+          await yieldToUi();
+        };
+        const { embeddings, context } = isOnnxRuntime
+          ? await encodePhotoForSamOnnx(
+              samEncoderModelOnnx!,
+              photo.image,
+              samVariant.preprocessing,
+              onEncodeProgress,
+            )
+          : await encodePhotoForSam(
+              samEncoderModel!,
+              photo.image,
+              samVariant.preprocessing,
+              onEncodeProgress,
+            );
         if (isCancelled) return;
         embeddingsRef.current = embeddings;
         encoderContextRef.current = context;
@@ -555,11 +683,14 @@ const MediaPage: React.FC = () => {
   }, [
     detectionModel,
     hasMediaLoaded,
+    isOnnxRuntime,
     isScreenFocused,
     path,
     runSegmentation,
-    samDecoderModel,
+    samDecoderReady,
     samEncoderModel,
+    samEncoderModelOnnx,
+    samEncoderReady,
     samVariant,
     type,
   ]);
@@ -714,8 +845,8 @@ const MediaPage: React.FC = () => {
     type === "photo" &&
     modelError == null &&
     (detectionModelHook.state !== "loaded" ||
-      samEncoderHook.state !== "loaded" ||
-      samDecoderHook.state !== "loaded" ||
+      !samEncoderReady ||
+      !samDecoderReady ||
       isBootstrapping ||
       isDecoding);
 
@@ -753,10 +884,18 @@ const MediaPage: React.FC = () => {
                   maskRuns.map((run, index) => (
                     <Rect
                       key={`mask-run-${index}`}
-                      x={imageRect.x + (run.x / maskData.maskWidth) * imageRect.width}
-                      y={imageRect.y + (run.y / maskData.maskHeight) * imageRect.height}
+                      x={
+                        imageRect.x +
+                        (run.x / maskData.maskWidth) * imageRect.width
+                      }
+                      y={
+                        imageRect.y +
+                        (run.y / maskData.maskHeight) * imageRect.height
+                      }
                       width={(run.width / maskData.maskWidth) * imageRect.width}
-                      height={(1 / maskData.maskHeight) * imageRect.height + 0.5}
+                      height={
+                        (1 / maskData.maskHeight) * imageRect.height + 0.5
+                      }
                       fill="rgba(34, 197, 94, 0.18)"
                     />
                   ))}
@@ -838,6 +977,28 @@ const MediaPage: React.FC = () => {
             {errorText != null && (
               <Text style={styles.errorText}>{errorText}</Text>
             )}
+            <View style={styles.debugToggleRow}>
+              <View
+                style={[
+                  styles.debugToggle,
+                  detectorUseGpu && styles.debugToggleActive,
+                ]}
+              >
+                <Text style={styles.debugToggleText}>
+                  Detector: {detectorUseGpu ? "GPU" : "CPU"}
+                </Text>
+              </View>
+              <View
+                style={[
+                  styles.debugToggle,
+                  samUseGpu && styles.debugToggleActive,
+                ]}
+              >
+                <Text style={styles.debugToggleText}>
+                  SAM: {samUseGpu ? "GPU" : "CPU"}
+                </Text>
+              </View>
+            </View>
           </View>
 
           <View style={styles.segmentationControls}>
@@ -945,6 +1106,25 @@ const styles = StyleSheet.create({
   topStatusText: {
     color: "white",
     fontSize: 13,
+  },
+  debugToggleRow: {
+    flexDirection: "row",
+    gap: 6,
+    marginTop: 4,
+  },
+  debugToggle: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 12,
+    backgroundColor: "rgba(255, 255, 255, 0.16)",
+  },
+  debugToggleActive: {
+    backgroundColor: "rgba(34, 197, 94, 0.75)",
+  },
+  debugToggleText: {
+    color: "white",
+    fontSize: 11,
+    fontWeight: "600",
   },
   segmentationControls: {
     position: "absolute",

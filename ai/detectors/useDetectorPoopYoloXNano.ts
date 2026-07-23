@@ -8,6 +8,7 @@ import { createYoloXNanoDetector } from "./yoloxNanoDetector";
 
 export function useDetectorYoloXNanoPoop(
   useShitSpotterModel: boolean,
+  preferGpu: boolean = true,
 ): UseDetectorResult {
   // Define model assets statically for require() to work
   const modelAsset = useShitSpotterModel
@@ -24,13 +25,20 @@ export function useDetectorYoloXNanoPoop(
     pixelLayout: "interleaved",
   });
 
+  // Resets whenever the requested config actually changes (model or GPU/CPU
+  // preference) -- this hook's OWN component instance stays mounted across a
+  // Det: CPU/GPU toggle flip (only preferGpu re-renders), so an empty
+  // dependency array here would freeze this at first mount and every
+  // "elapsed" log below would measure time-since-app-launch instead of
+  // time-since-this-load-actually-started.
   const loadStartTime = useMemo(() => {
     const time = Date.now();
     console.log(
-      `[ModelLoader] 🚀 useDetectorYoloXNanoPoop hook initialized at ${time}`,
+      `[ModelLoader] 🚀 useDetectorYoloXNanoPoop hook (re)initialized at ${time} ` +
+        `(useShitSpotterModel=${useShitSpotterModel}, preferGpu=${preferGpu})`,
     );
     return time;
-  }, []);
+  }, [useShitSpotterModel, preferGpu]);
 
   // Try GPU first, fallback to CPU on error. Both load through the shared
   // model cache (ai/tfliteModelCache.ts) so the photo-detail screen (media.tsx),
@@ -38,9 +46,12 @@ export function useDetectorYoloXNanoPoop(
   // instead of re-loading the model from scratch.
   const [useFallback, setUseFallback] = useState(false);
 
+  // preferGpu=false (camera screen's Det: CPU/GPU toggle) makes this request
+  // delegates=[] too -- same cache key as cpuModelHook below, so it's a cache
+  // hit rather than a second load, and GPU is never attempted at all.
   const gpuModelHook = useCachedTensorflowModel(
     modelAsset,
-    Platform.OS === "ios" ? ["core-ml"] : ["android-gpu"],
+    preferGpu ? (Platform.OS === "ios" ? ["core-ml"] : ["android-gpu"]) : [],
   );
 
   const cpuModelHook = useCachedTensorflowModel(modelAsset, []);
@@ -64,15 +75,16 @@ export function useDetectorYoloXNanoPoop(
   // Track state changes
   useEffect(() => {
     const elapsed = Date.now() - loadStartTime;
-    const delegateType = useFallback
-      ? "CPU"
-      : Platform.OS === "ios"
-        ? "CoreML"
-        : "GPU";
+    const delegateType =
+      useFallback || !preferGpu
+        ? "CPU"
+        : Platform.OS === "ios"
+          ? "CoreML"
+          : "GPU";
     console.log(
       `[ModelLoader] 📊 Model state changed to: ${modelHook.state} (${delegateType}, ${elapsed}ms elapsed)`,
     );
-  }, [modelHook.state, loadStartTime, useFallback]);
+  }, [modelHook.state, loadStartTime, useFallback, preferGpu]);
 
   useEffect(() => {
     if (resizerState.state === "error") {
