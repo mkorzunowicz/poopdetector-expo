@@ -11,7 +11,7 @@ export interface SavedPhotoSegmentation {
   imageHeight: number;
   score: number;
   points: SamPoint[];
-  polygon: Array<{ x: number; y: number }>;
+  polygons: Array<Array<{ x: number; y: number }>>;
   detections: Detection[];
 }
 
@@ -157,7 +157,7 @@ export async function savePhotoSegmentation(
   logPhotoStore("savePhotoSegmentation begin", {
     photoPath: segmentation.photoPath,
     pointCount: segmentation.points.length,
-    polygonPoints: segmentation.polygon.length,
+    polygonCount: segmentation.polygons.length,
   });
   const store = await readStore();
   const key = normalizeKey(segmentation.photoPath);

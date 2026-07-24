@@ -190,7 +190,7 @@ export async function decodeSamMaskOnnx(
       binaryMask: new Uint8Array(SAM_MASK_SIZE * SAM_MASK_SIZE),
       maskWidth: SAM_MASK_SIZE,
       maskHeight: SAM_MASK_SIZE,
-      polygon: [],
+      polygons: [],
       score: 0,
     };
   }
@@ -249,21 +249,19 @@ export async function decodeSamMaskOnnx(
     context,
   );
 
-  const positivePoints = packedPoints.filter((point) => point.label === 1);
-  const polygon = maskToPolygon(
+  const polygons = maskToPolygon(
     mask,
     width,
     height,
     context.originalWidth,
     context.originalHeight,
-    positivePoints,
   );
 
   const totalMs = elapsedMs(startTime);
   logSam(
     `Decoded in ${totalMs}ms (native x${packedPoints.length}, ` +
-      `score ${score.toFixed(2)}, ${polygon.length} poly pts)`,
+      `score ${score.toFixed(2)}, ${polygons.length} poly)`,
   );
 
-  return { binaryMask: mask, maskWidth: width, maskHeight: height, polygon, score };
+  return { binaryMask: mask, maskWidth: width, maskHeight: height, polygons, score };
 }

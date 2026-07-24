@@ -18,6 +18,7 @@ import {
   useTensorflowModelSlot,
 } from "@/ai/tfliteModelCache";
 import { SAFE_AREA_PADDING } from "@/components/Constants";
+import { SegmentationOverlay } from "@/components/SegmentationOverlay";
 import { tr } from "@/i18n/i18n";
 import {
   attachPhotoSegmentationAssetId,
@@ -53,7 +54,6 @@ import {
 } from "react-native";
 import type { TensorflowModelDelegate } from "react-native-fast-tflite";
 import type { SessionOptions } from "react-native-nitro-onnxruntime";
-import Svg, { Circle, Polygon, Rect } from "react-native-svg";
 
 const DETECTION_MODEL_ASSET = require("../assets/yolox_nano_poop_cropped_only_best_float32.tflite");
 
@@ -185,7 +185,9 @@ const MediaPage: React.FC = () => {
   const [detections, setDetections] = useState<Detection[]>([]);
   const [points, setPoints] = useState<SamPoint[]>([]);
   const [pointMode, setPointMode] = useState<0 | 1>(1);
-  const [polygon, setPolygon] = useState<Array<{ x: number; y: number }>>([]);
+  const [polygons, setPolygons] = useState<Array<Array<{ x: number; y: number }>>>(
+    [],
+  );
   const [maskData, setMaskData] = useState<{
     binaryMask: Uint8Array;
     maskWidth: number;
@@ -384,7 +386,7 @@ const MediaPage: React.FC = () => {
     setContainerSize({ width: 0, height: 0 });
     setDetections([]);
     setPoints([]);
-    setPolygon([]);
+    setPolygons([]);
     setMaskData(null);
     setMaskScore(null);
     setStatusText("Loading models...");
@@ -441,7 +443,7 @@ const MediaPage: React.FC = () => {
   const persistSegmentation = useCallback(
     async (
       nextPoints: SamPoint[],
-      nextPolygon: Array<{ x: number; y: number }>,
+      nextPolygons: Array<Array<{ x: number; y: number }>>,
       nextScore: number,
       nextDetections: Detection[],
     ) => {
@@ -457,7 +459,7 @@ const MediaPage: React.FC = () => {
         imageHeight: photo.height,
         score: nextScore,
         points: nextPoints,
-        polygon: nextPolygon,
+        polygons: nextPolygons,
         detections: nextDetections,
       });
     },
@@ -490,7 +492,7 @@ const MediaPage: React.FC = () => {
         });
 
         if (nextPoints.length === 0) {
-          setPolygon([]);
+          setPolygons([]);
           setMaskData(null);
           setMaskScore(null);
           setStatusText("Mask cleared.");
@@ -521,23 +523,23 @@ const MediaPage: React.FC = () => {
           maskWidth: result.maskWidth,
           maskHeight: result.maskHeight,
         });
-        setPolygon(result.polygon);
+        setPolygons(result.polygons);
         setMaskScore(result.score);
         setStatusText(
-          result.polygon.length > 2
+          result.polygons.length > 0
             ? `Mask updated (${Math.round(result.score * 100)}% confidence)`
             : "Mask updated.",
         );
         await persistSegmentation(
           nextPoints,
-          result.polygon,
+          result.polygons,
           result.score,
           detectionsRef.current,
         );
         logMediaSamUi("runSegmentation complete", {
           elapsedMs: Date.now() - startTime,
           score: result.score,
-          polygonPoints: result.polygon.length,
+          polygonCount: result.polygons.length,
         });
       } catch (error) {
         logMediaSamUiError("runSegmentation failed", error, {
@@ -636,7 +638,10 @@ const MediaPage: React.FC = () => {
           elapsedMs: Date.now() - startTime,
           found: savedSegmentation != null,
           pointCount: savedSegmentation?.points.length ?? 0,
-          polygonPoints: savedSegmentation?.polygon.length ?? 0,
+          // Optional-chained on .polygons too, not just savedSegmentation --
+          // entries saved before the multi-polygon change won't have this
+          // field at all.
+          polygonCount: savedSegmentation?.polygons?.length ?? 0,
         });
 
         const seededPoints = savedSegmentation?.points.length
@@ -784,62 +789,12 @@ const MediaPage: React.FC = () => {
     }
   }, [path, type]);
 
-  const polygonPoints = useMemo(() => {
-    if (
-      !imageRect ||
-      photoSize.width <= 0 ||
-      photoSize.height <= 0 ||
-      polygon.length < 3
-    ) {
-      return "";
-    }
-
-    return polygon
-      .map(
-        (point) =>
-          `${imageRect.x + (point.x / photoSize.width) * imageRect.width},${
-            imageRect.y + (point.y / photoSize.height) * imageRect.height
-          }`,
-      )
-      .join(" ");
-  }, [imageRect, photoSize.height, photoSize.width, polygon]);
-
-  const maskRuns = useMemo(() => {
-    if (!imageRect || !maskData) {
-      return [] as Array<{ x: number; y: number; width: number }>;
-    }
-
-    const runs: Array<{ x: number; y: number; width: number }> = [];
-    const { binaryMask, maskWidth, maskHeight } = maskData;
-
-    for (let y = 0; y < maskHeight; y += 1) {
-      let runStart = -1;
-
-      for (let x = 0; x < maskWidth; x += 1) {
-        const isFilled = binaryMask[y * maskWidth + x] === 1;
-
-        if (isFilled && runStart === -1) {
-          runStart = x;
-        }
-
-        const isRunEnd = runStart !== -1 && (!isFilled || x === maskWidth - 1);
-        if (!isRunEnd) {
-          continue;
-        }
-
-        const endX = isFilled && x === maskWidth - 1 ? x + 1 : x;
-        runs.push({
-          x: runStart,
-          y,
-          width: endX - runStart,
-        });
-        runStart = -1;
-      }
-    }
-
-    return runs;
-  }, [imageRect, maskData]);
-
+  // Builds ONE SVG path combining every contour (outer object boundaries AND
+  // holes) as separate closed subpaths. Rendered with fillRule="evenodd",
+  // which fills by nesting parity -- even nesting depth is solid, odd is a
+  // hole -- so a hole punches out automatically with no separate outer/hole
+  // classification needed here. Multiple disconnected objects just become
+  // multiple independent (non-nested, so all "even") subpaths.
   const canInteract = type === "photo" && imageRect != null && !isBootstrapping;
   const showLoader =
     type === "photo" &&
@@ -878,64 +833,14 @@ const MediaPage: React.FC = () => {
               onPress={handleImagePress}
               disabled={!canInteract}
             >
-              <Svg style={StyleSheet.absoluteFill}>
-                {imageRect &&
-                  maskData &&
-                  maskRuns.map((run, index) => (
-                    <Rect
-                      key={`mask-run-${index}`}
-                      x={
-                        imageRect.x +
-                        (run.x / maskData.maskWidth) * imageRect.width
-                      }
-                      y={
-                        imageRect.y +
-                        (run.y / maskData.maskHeight) * imageRect.height
-                      }
-                      width={(run.width / maskData.maskWidth) * imageRect.width}
-                      height={
-                        (1 / maskData.maskHeight) * imageRect.height + 0.5
-                      }
-                      fill="rgba(34, 197, 94, 0.18)"
-                    />
-                  ))}
-
-                {imageRect &&
-                  detections.map((detection, index) => (
-                    <Rect
-                      key={`detection-${index}`}
-                      x={imageRect.x + detection.x1 * imageRect.width}
-                      y={imageRect.y + detection.y1 * imageRect.height}
-                      width={(detection.x2 - detection.x1) * imageRect.width}
-                      height={(detection.y2 - detection.y1) * imageRect.height}
-                      stroke="#22D3EE"
-                      strokeWidth={2}
-                      fill="transparent"
-                    />
-                  ))}
-
-                {polygonPoints.length > 0 && (
-                  <Polygon
-                    points={polygonPoints}
-                    fill="rgba(34, 197, 94, 0.28)"
-                    stroke="#22C55E"
-                    strokeWidth={2}
-                  />
-                )}
-
-                {imageRect &&
-                  points.map((point, index) => (
-                    <Circle
-                      key={`point-${index}`}
-                      cx={imageRect.x + point.x * imageRect.width}
-                      cy={imageRect.y + point.y * imageRect.height}
-                      r={6}
-                      fill={point.label === 1 ? "#22C55E" : "#EF4444"}
-                      stroke="white"
-                      strokeWidth={2}
-                    />
-                  ))}
-              </Svg>
+              <SegmentationOverlay
+                imageRect={imageRect}
+                photoSize={photoSize}
+                maskData={maskData}
+                polygons={polygons}
+                detections={detections}
+                points={points}
+              />
             </Pressable>
           </>
         )}

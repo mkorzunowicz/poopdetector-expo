@@ -111,7 +111,12 @@ export interface SamDecodeResult {
   binaryMask: Uint8Array;
   maskWidth: number;
   maskHeight: number;
-  polygon: Array<{ x: number; y: number }>;
+  // Every significant closed contour in the mask -- possibly more than one
+  // disconnected object, and/or holes nested inside an outer boundary.
+  // Render as a single SVG Path with fillRule="evenodd": that rule fills by
+  // nesting parity (even depth = solid, odd depth = hole) automatically, so
+  // no separate outer/hole classification is needed here. See maskToPolygon.
+  polygons: Array<Array<{ x: number; y: number }>>;
   score: number;
 }
 
@@ -1043,10 +1048,6 @@ export function summarizeMaskValues(values: Float32Array): {
   };
 }
 
-function pointKey(x: number, y: number): string {
-  return `${x.toFixed(2)},${y.toFixed(2)}`;
-}
-
 function polygonArea(points: Array<{ x: number; y: number }>): number {
   let area = 0;
   for (let index = 0; index < points.length; index += 1) {
@@ -1057,89 +1058,15 @@ function polygonArea(points: Array<{ x: number; y: number }>): number {
   return area * 0.5;
 }
 
-function isPointInPolygon(
-  point: { x: number; y: number },
-  polygon: Array<{ x: number; y: number }>,
-): boolean {
-  let inside = false;
-  for (
-    let i = 0, j = polygon.length - 1;
-    i < polygon.length;
-    j = i, i += 1
-  ) {
-    const a = polygon[i]!;
-    const b = polygon[j]!;
-    const intersects =
-      a.y > point.y !== b.y > point.y &&
-      point.x < ((b.x - a.x) * (point.y - a.y)) / (b.y - a.y) + a.x;
-    if (intersects) inside = !inside;
-  }
-  return inside;
+function pointKey(x: number, y: number): string {
+  return `${x.toFixed(2)},${y.toFixed(2)}`;
 }
 
-function distanceToNearestVertex(
-  point: { x: number; y: number },
-  polygon: Array<{ x: number; y: number }>,
-): number {
-  let minDistance = Number.POSITIVE_INFINITY;
-  for (const vertex of polygon) {
-    const distance = Math.hypot(vertex.x - point.x, vertex.y - point.y);
-    if (distance < minDistance) minDistance = distance;
-  }
-  return minDistance;
-}
-
-function selectLargestContour(
-  contours: Array<Array<{ x: number; y: number }>>,
-): Array<{ x: number; y: number }> {
-  let largestContour = contours[0]!;
-  let largestArea = Math.abs(polygonArea(largestContour));
-  for (const contour of contours.slice(1)) {
-    const area = Math.abs(polygonArea(contour));
-    if (area > largestArea) {
-      largestArea = area;
-      largestContour = contour;
-    }
-  }
-  return largestContour;
-}
-
-// A binary mask can have multiple disconnected foreground blobs. With several
-// accumulated positive taps (see decodeSamMask's per-point union), each tap
-// can legitimately produce its own blob. Prefer the blob containing the MOST
-// RECENTLY tapped point (referencePoints is oldest-first) over blind
-// largest-area, so the last thing you tapped is what gets outlined.
-function selectRelevantContour(
-  contours: Array<Array<{ x: number; y: number }>>,
-  referencePoints: Array<{ x: number; y: number }>,
-): Array<{ x: number; y: number }> {
-  if (contours.length === 1 || referencePoints.length === 0) {
-    return selectLargestContour(contours);
-  }
-
-  for (let index = referencePoints.length - 1; index >= 0; index -= 1) {
-    const referencePoint = referencePoints[index]!;
-    const containingContour = contours.find((contour) =>
-      isPointInPolygon(referencePoint, contour),
-    );
-    if (containingContour) {
-      return containingContour;
-    }
-  }
-
-  const mostRecentPoint = referencePoints[referencePoints.length - 1]!;
-  let best = contours[0]!;
-  let bestDistance = Number.POSITIVE_INFINITY;
-  for (const contour of contours) {
-    const distance = distanceToNearestVertex(mostRecentPoint, contour);
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      best = contour;
-    }
-  }
-  return best;
-}
-
+// Stitches the unordered edge segments marching squares emits per-cell into
+// closed loops by walking shared endpoints. Returns EVERY closed loop found
+// -- both outer object boundaries and holes (a hole is topologically just
+// another closed contour, nested inside an outer one; see maskToPolygon for
+// how that nesting gets rendered without needing to classify them here).
 function buildContourFromSegments(
   segments: Array<[{ x: number; y: number }, { x: number; y: number }]>,
 ): Array<Array<{ x: number; y: number }>> {
@@ -1216,12 +1143,24 @@ function buildContourFromSegments(
   return contours;
 }
 
-function marchingSquaresContour(
+// Exact boundary tracing (marching squares) over the mask grid. Traces the
+// TRUE pixel boundary -- however concave -- with zero approximation error,
+// and naturally finds every disconnected object AND every hole (a hole's
+// boundary is topologically identical to any other foreground/background
+// boundary, so it falls out of the same algorithm for free). This replaced
+// an earlier flood-fill + convex-hull approach (ported from a working
+// reference C# app) that was simpler and structurally bug-proof, but could
+// only approximate shapes (no concavity, no holes, and picked a single
+// "most relevant" blob rather than showing every object) -- see the
+// marching-squares-saddle-case-bug memory for the full history, including
+// two real bugs already found and fixed in this exact lookup table (a
+// swapped ambiguous-case pairing, and missing boundary handling at the
+// mask's own edge -- both fixes are preserved below).
+function marchingSquaresContours(
   binaryMask: Uint8Array,
   width: number,
   height: number,
-  referencePoints: Array<{ x: number; y: number }>,
-): Array<{ x: number; y: number }> {
+): Array<Array<{ x: number; y: number }>> {
   const segments: Array<[{ x: number; y: number }, { x: number; y: number }]> =
     [];
   const lookup: Record<number, Array<[number, number]>> = {
@@ -1230,17 +1169,22 @@ function marchingSquaresContour(
     2: [[2, 1]],
     3: [[3, 1]],
     4: [[0, 1]],
+    // Ambiguous "saddle" cases (diagonal corners foreground, e.g. TR+BL for
+    // case 5): each needs TWO segments, one isolating each diagonal corner
+    // via its own two adjacent edges. Case 5 (TR+BL) isolates TR via
+    // top+right and BL via left+bottom; case 10 (TL+BR) isolates TL via
+    // top+left and BR via bottom+right.
     5: [
-      [0, 3],
-      [1, 2],
+      [0, 1],
+      [3, 2],
     ],
     6: [[0, 2]],
     7: [[0, 3]],
     8: [[0, 3]],
     9: [[0, 2]],
     10: [
-      [0, 1],
-      [2, 3],
+      [0, 3],
+      [2, 1],
     ],
     11: [[0, 1]],
     12: [[3, 1]],
@@ -1264,12 +1208,25 @@ function marchingSquaresContour(
     }
   };
 
-  for (let y = 0; y < height - 1; y += 1) {
-    for (let x = 0; x < width - 1; x += 1) {
-      const topLeft = binaryMask[y * width + x] ?? 0;
-      const topRight = binaryMask[y * width + x + 1] ?? 0;
-      const bottomRight = binaryMask[(y + 1) * width + x + 1] ?? 0;
-      const bottomLeft = binaryMask[(y + 1) * width + x] ?? 0;
+  // Out-of-bounds pixels count as background (0). Must be an explicit bounds
+  // check -- a flat-array index like binaryMask[y*width + (-1)] or
+  // binaryMask[y*width + width] does NOT go out of the array's total
+  // bounds for interior rows, it silently aliases into the adjacent row.
+  const pixelAt = (x: number, y: number): number => {
+    if (x < 0 || x >= width || y < 0 || y >= height) {
+      return 0;
+    }
+    return binaryMask[y * width + x] ?? 0;
+  };
+
+  // Loop runs one cell beyond the mask on every side so foreground that
+  // touches the mask's own edge still gets a closing boundary segment there.
+  for (let y = -1; y < height; y += 1) {
+    for (let x = -1; x < width; x += 1) {
+      const topLeft = pixelAt(x, y);
+      const topRight = pixelAt(x + 1, y);
+      const bottomRight = pixelAt(x + 1, y + 1);
+      const bottomLeft = pixelAt(x, y + 1);
       const caseIndex =
         topLeft * 8 + topRight * 4 + bottomRight * 2 + bottomLeft;
       const edges = lookup[caseIndex] ?? [];
@@ -1284,68 +1241,12 @@ function marchingSquaresContour(
     return [];
   }
 
-  const contours = buildContourFromSegments(segments);
-  if (contours.length === 0) {
-    return [];
-  }
-
-  return selectRelevantContour(contours, referencePoints);
+  return buildContourFromSegments(segments);
 }
 
-function perpendicularDistance(
-  point: { x: number; y: number },
-  lineStart: { x: number; y: number },
-  lineEnd: { x: number; y: number },
-): number {
-  const numerator = Math.abs(
-    (lineEnd.y - lineStart.y) * point.x -
-      (lineEnd.x - lineStart.x) * point.y +
-      lineEnd.x * lineStart.y -
-      lineEnd.y * lineStart.x,
-  );
-  const denominator = Math.hypot(
-    lineEnd.y - lineStart.y,
-    lineEnd.x - lineStart.x,
-  );
-  return denominator === 0 ? 0 : numerator / denominator;
-}
-
-function simplifyPolygon(
-  points: Array<{ x: number; y: number }>,
-  tolerance: number,
-): Array<{ x: number; y: number }> {
-  if (points.length <= 3) {
-    return points;
-  }
-
-  let maxDistance = 0;
-  let index = 0;
-  const lastPoint = points[points.length - 1]!;
-
-  for (
-    let currentIndex = 1;
-    currentIndex < points.length - 1;
-    currentIndex += 1
-  ) {
-    const distance = perpendicularDistance(
-      points[currentIndex]!,
-      points[0]!,
-      lastPoint,
-    );
-    if (distance > maxDistance) {
-      index = currentIndex;
-      maxDistance = distance;
-    }
-  }
-
-  if (maxDistance <= tolerance) {
-    return [points[0]!, lastPoint];
-  }
-
-  const left = simplifyPolygon(points.slice(0, index + 1), tolerance);
-  const right = simplifyPolygon(points.slice(index), tolerance);
-  return [...left.slice(0, -1), ...right];
-}
+// Below this size a contour is raw logit-threshold noise (1-2 stray
+// pixels), not a real object or hole.
+const MIN_CONTOUR_AREA_PIXELS = 4;
 
 // Exported: reused as-is by ai/samOnnxNitro.ts.
 export function maskToPolygon(
@@ -1354,30 +1255,18 @@ export function maskToPolygon(
   maskHeight: number,
   originalWidth: number,
   originalHeight: number,
-  // Normalized (0..1, original-image-space) prompt points, oldest-first, used
-  // to pick the foreground blob the user actually meant when the mask has
-  // more than one disconnected region. See selectRelevantContour.
-  referencePointsNormalized: Array<{ x: number; y: number }>,
-): Array<{ x: number; y: number }> {
-  const referencePoints = referencePointsNormalized.map((point) => ({
-    x: point.x * maskWidth,
-    y: point.y * maskHeight,
-  }));
-  const contour = marchingSquaresContour(
-    binaryMask,
-    maskWidth,
-    maskHeight,
-    referencePoints,
+): Array<Array<{ x: number; y: number }>> {
+  const contours = marchingSquaresContours(binaryMask, maskWidth, maskHeight);
+  const significant = contours.filter(
+    (contour) => Math.abs(polygonArea(contour)) >= MIN_CONTOUR_AREA_PIXELS,
   );
-  if (contour.length === 0) {
-    return [];
-  }
 
-  const simplified = simplifyPolygon(contour, 1.5);
-  return simplified.map((point) => ({
-    x: Math.round((point.x / maskWidth) * originalWidth),
-    y: Math.round((point.y / maskHeight) * originalHeight),
-  }));
+  return significant.map((contour) =>
+    contour.map((point) => ({
+      x: Math.round((point.x / maskWidth) * originalWidth),
+      y: Math.round((point.y / maskHeight) * originalHeight),
+    })),
+  );
 }
 
 // The decoder's mask covers the full encoder canvas (which includes letterbox
@@ -1607,7 +1496,7 @@ export async function decodeSamMask(
         binaryMask: new Uint8Array(SAM_MASK_SIZE * SAM_MASK_SIZE),
         maskWidth: SAM_MASK_SIZE,
         maskHeight: SAM_MASK_SIZE,
-        polygon: [],
+        polygons: [],
         score: 0,
       };
     }
@@ -1711,13 +1600,12 @@ export async function decodeSamMask(
       score = scoreSum / Math.max(1, positiveBatchCount);
     }
 
-    const polygon = maskToPolygon(
+    const polygons = maskToPolygon(
       combinedMask,
       maskWidth,
       maskHeight,
       context.originalWidth,
       context.originalHeight,
-      positivePoints,
     );
     const foregroundPixels = countMaskForegroundPixels(combinedMask);
     const totalMs = elapsedMs(startTime);
@@ -1727,20 +1615,21 @@ export async function decodeSamMask(
       path: "3-input",
       mode,
       score,
-      polygonPoints: polygon.length,
+      polygonCount: polygons.length,
+      polygonPoints: polygons.reduce((sum, polygon) => sum + polygon.length, 0),
       maskPixels: combinedMask.length,
       foregroundPixels,
     });
     logSam(
       `Decoded in ${totalMs}ms (${mode}, ${inferCalls} infer, ` +
-        `score ${score.toFixed(2)}, ${polygon.length} poly pts)`,
+        `score ${score.toFixed(2)}, ${polygons.length} poly)`,
     );
 
     return {
       binaryMask: combinedMask,
       maskWidth,
       maskHeight,
-      polygon,
+      polygons,
       score,
     };
   }
@@ -1800,13 +1689,12 @@ export async function decodeSamMask(
     model.outputs.map((tensor) => tensor.shape),
   );
   const binaryMask = toBinaryMask(logits, threshold);
-  const polygon = maskToPolygon(
+  const polygons = maskToPolygon(
     binaryMask,
     SAM_MASK_SIZE,
     SAM_MASK_SIZE,
     context.originalWidth,
     context.originalHeight,
-    points.filter((point) => point.label === 1),
   );
 
   logMediaSam("Decoder pipeline complete", {
@@ -1814,7 +1702,8 @@ export async function decodeSamMask(
     path: "6-input",
     outputLengths: outputs.map((output) => output.length),
     score,
-    polygonPoints: polygon.length,
+    polygonCount: polygons.length,
+    polygonPoints: polygons.reduce((sum, polygon) => sum + polygon.length, 0),
     maskPixels: binaryMask.length,
   });
 
@@ -1822,7 +1711,7 @@ export async function decodeSamMask(
     binaryMask,
     maskWidth: SAM_MASK_SIZE,
     maskHeight: SAM_MASK_SIZE,
-    polygon,
+    polygons,
     score,
   };
 }
