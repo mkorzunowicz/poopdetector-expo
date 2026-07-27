@@ -11,6 +11,11 @@ import {
   type SamPoint,
 } from "@/ai/mobileSamPhoto";
 import { useOnnxModelSlot } from "@/ai/onnxModelCache";
+import {
+  samEncoderTfliteDelegates,
+  samOnnxProviderOptions,
+  TFLITE_GPU_DELEGATES,
+} from "@/ai/samDelegates";
 import { getSamVariant } from "@/ai/samModels";
 import { decodeSamMaskOnnx, encodePhotoForSamOnnx } from "@/ai/samOnnxNitro";
 import {
@@ -45,15 +50,12 @@ import type { GestureResponderEvent, LayoutChangeEvent } from "react-native";
 import {
   ActivityIndicator,
   Alert,
-  Platform,
   Pressable,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
 } from "react-native";
-import type { TensorflowModelDelegate } from "react-native-fast-tflite";
-import type { SessionOptions } from "react-native-nitro-onnxruntime";
 
 const DETECTION_MODEL_ASSET = require("../assets/yolox_nano_poop_cropped_only_best_float32.tflite");
 
@@ -220,32 +222,6 @@ const MediaPage: React.FC = () => {
   // hooks below, so each logs its own elapsed-since-mount when it goes ready.
   const loadStartRef = useRef(Date.now());
 
-  // Platform GPU/NPU delegate ids, reused by both debug toggles below. iOS ->
-  // Core ML, Android -> GPU delegate (TFLite) / NNAPI (ONNX); both fall back
-  // to CPU per-unsupported-op automatically. Repeated A/B testing settled on
-  // CPU as the default for both the detector and every SAM path (GPU
-  // delegates measured slower, and for ONNX CoreML even less accurate, than
-  // CPU -- see memory) -- these toggles exist to re-verify that per device
-  // without a code change.
-  const tfliteGpuDelegates = useMemo<TensorflowModelDelegate[]>(
-    () =>
-      Platform.OS === "ios"
-        ? ["core-ml"]
-        : Platform.OS === "android"
-          ? ["android-gpu"]
-          : [],
-    [],
-  );
-  const onnxGpuProviderOptions = useMemo<SessionOptions | undefined>(
-    () =>
-      Platform.OS === "ios"
-        ? { executionProviders: [{ name: "coreml" }] }
-        : Platform.OS === "android"
-          ? { executionProviders: [{ name: "nnapi" }] }
-          : undefined,
-    [],
-  );
-
   // Cached: the camera screen (useDetectorYoloXNanoPoop) already loads this
   // exact asset with delegates=[] (CPU) AND with the GPU delegate as its own
   // two cached instances, so whichever this toggle picks is very likely
@@ -253,7 +229,7 @@ const MediaPage: React.FC = () => {
   // ai/tfliteModelCache.ts.
   const detectionModelHook = useCachedTensorflowModel(
     DETECTION_MODEL_ASSET,
-    detectorUseGpu ? tfliteGpuDelegates : [],
+    detectorUseGpu ? TFLITE_GPU_DELEGATES : [],
   );
   const isOnnxRuntime = samVariant.runtime === "onnx-nitro";
   // Role-scoped: this screen fully unmounts/remounts on every photo capture,
@@ -266,31 +242,39 @@ const MediaPage: React.FC = () => {
   //
   // Both TFLite and ONNX slots are called unconditionally every render (rules
   // of hooks) with `enabled` gating the actual load to whichever runtime the
-  // selected variant needs.
-  const samTfliteDelegates = samUseGpu ? tfliteGpuDelegates : [];
+  // selected variant needs. app/(tabs)/index.tsx prefetches with the SAME
+  // role/asset/delegate combination (via ai/samDelegates.ts) as soon as a
+  // variant is selected, so these are very likely a cache hit by the time a
+  // photo is captured.
   const samEncoderTfliteHook = useTensorflowModelSlot(
     "sam-encoder",
     samVariant.encoderAsset,
-    samTfliteDelegates,
+    samEncoderTfliteDelegates(samUseGpu),
     !isOnnxRuntime,
   );
+  // Decoder is ALWAYS CPU, regardless of the SAM: CPU/GPU toggle -- confirmed
+  // on-device (Android) that the GPU delegate here returns an empty mask
+  // (0 polygons, frozen 0.80 score regardless of tap points/count) instead of
+  // erroring or falling back, so it fails silently rather than safely. Most
+  // likely its INT64 point_labels input isn't properly supported by the GPU
+  // delegate. This was previously CPU-only unconditionally; got broken when
+  // the encoder/decoder delegate choice was unified into one toggle.
   const samDecoderTfliteHook = useTensorflowModelSlot(
     "sam-decoder",
     samVariant.decoderAsset,
-    samTfliteDelegates,
+    [],
     !isOnnxRuntime,
   );
-  const samOnnxProviderOptions = samUseGpu ? onnxGpuProviderOptions : undefined;
   const samEncoderOnnxHook = useOnnxModelSlot(
     "sam-encoder-onnx",
     samVariant.encoderAsset,
-    samOnnxProviderOptions,
+    samOnnxProviderOptions(samUseGpu),
     isOnnxRuntime,
   );
   const samDecoderOnnxHook = useOnnxModelSlot(
     "sam-decoder-onnx",
     samVariant.decoderAsset,
-    samOnnxProviderOptions,
+    samOnnxProviderOptions(samUseGpu),
     isOnnxRuntime,
   );
 
@@ -338,8 +322,9 @@ const MediaPage: React.FC = () => {
     }
   }, [samDecoderModel, samVariant.name]);
 
-  const onnxProviderLabel = samOnnxProviderOptions?.executionProviders?.length
-    ? samOnnxProviderOptions.executionProviders
+  const activeOnnxProviderOptions = samOnnxProviderOptions(samUseGpu);
+  const onnxProviderLabel = activeOnnxProviderOptions?.executionProviders?.length
+    ? activeOnnxProviderOptions.executionProviders
         .map((provider) =>
           typeof provider === "string" ? provider : provider.name,
         )

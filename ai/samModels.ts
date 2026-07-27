@@ -79,7 +79,7 @@ export const SAM_VARIANTS: SamVariant[] = [
   },
 ];
 
-export const DEFAULT_SAM_VARIANT_ID: SamVariantId = "mobilesam-new";
+export const DEFAULT_SAM_VARIANT_ID: SamVariantId = "edgesam-onnx-nitro";
 
 export function getSamVariant(id: string | undefined | null): SamVariant {
   return (

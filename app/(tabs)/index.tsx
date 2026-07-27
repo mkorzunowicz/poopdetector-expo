@@ -34,12 +34,18 @@ import { createSynchronizable, scheduleOnRN } from "react-native-worklets";
 
 import { DETECTOR_NAMES, DetectorName, useDetector } from "@/ai/detectors";
 import { Detection } from "@/ai/detectors/types";
+import { useOnnxModelSlot } from "@/ai/onnxModelCache";
+import {
+  samEncoderTfliteDelegates,
+  samOnnxProviderOptions,
+} from "@/ai/samDelegates";
 import {
   DEFAULT_SAM_VARIANT_ID,
   getSamVariant,
   nextSamVariantId,
   type SamVariantId,
 } from "@/ai/samModels";
+import { useTensorflowModelSlot } from "@/ai/tfliteModelCache";
 import { useFocusEffect } from "@react-navigation/core";
 
 import { CaptureButton } from "@/components/buttons/CaptureButton";
@@ -208,12 +214,27 @@ const CameraPage: React.FC = () => {
   // toggling it changes frame-processor behavior on this screen immediately.
   // Both also get passed to the media/photo screen for its own (separate)
   // detector + SAM model instances, so the effect of switching is easy to
-  // compare by capturing twice with the setting flipped. Both default to
-  // CPU, matching this app's settled default after repeated A/B testing (GPU
-  // delegates measured slower, and for ONNX CoreML even less accurate, than
-  // CPU).
+  // compare by capturing twice with the setting flipped.
+  //
+  // detectorUseGpu defaults to CPU (false). Dev-client A/B testing on one
+  // device showed GPU running live detection 3-4x faster once compiled
+  // (~60ms/frame vs ~230ms/frame CPU) after a ~4s one-time compile cost, so
+  // GPU-default was tried -- but a preview/production Android build hung
+  // indefinitely at "Loading detector" with zero logcat errors: the GPU
+  // delegate's fallback-to-CPU logic (useDetectorYoloXNanoPoop) only
+  // triggers on a clean "error" state, and NNAPI delegate compilation can
+  // HANG rather than error on some device/driver/build combinations (a known
+  // Android NNAPI issue category), which never resolves and never falls
+  // back. Reverted to CPU-default until there's a safe way to detect/bound
+  // that (e.g. a timeout-based fallback) rather than trusting the delegate
+  // to always fail cleanly. samUseGpu stays CPU-default too: GPU gave no
+  // measurable speedup for the SAM encoder, and actively broke the decoder
+  // (silently empty masks) before it was hardcoded back to CPU-only.
   const [detectorUseGpu, setDetectorUseGpu] = useState(false);
   const [samUseGpu, setSamUseGpu] = useState(false);
+
+  const samVariant = useMemo(() => getSamVariant(samVariantId), [samVariantId]);
+  const isSamOnnxRuntime = samVariant.runtime === "onnx-nitro";
 
   const onMediaCaptured = useCallback(
     (filePath: string, type: "photo" | "video") => {
@@ -290,6 +311,109 @@ const CameraPage: React.FC = () => {
 
   const [selected, setSelected] = useState<DetectorName>("poop-yolox-nano");
   const { detect, ready } = useDetector(selected, detectorUseGpu);
+
+  // Prefetch: start loading the currently-selected SAM model through the
+  // SAME role-scoped cache app/media.tsx uses (ai/tfliteModelCache.ts /
+  // ai/onnxModelCache.ts) with the SAME delegate/options computation
+  // (ai/samDelegates.ts, shared so the cache keys are guaranteed to match).
+  // By the time a photo is captured and the media screen mounts, the model
+  // is already loaded or well underway -- hiding most of a multi-second SAM
+  // load behind however long the user spends framing the shot.
+  //
+  // Gated on `ready` (the detector's own load having ALREADY completed),
+  // not just "screen mounted" -- starting both heavy native loads at once
+  // was starving the detector of the CPU it needed for its own startup,
+  // visibly delaying when live detection kicked in. Sequencing them (detector
+  // first, SAM prefetch only once it's confirmed running) fixes that; SAM
+  // loading in the background afterward only competes with the detector's
+  // much lighter steady-state per-frame inference, not its heavy initial
+  // load.
+  const samEncoderTflitePrefetch = useTensorflowModelSlot(
+    "sam-encoder",
+    samVariant.encoderAsset,
+    samEncoderTfliteDelegates(samUseGpu),
+    ready && !isSamOnnxRuntime,
+  );
+  const samDecoderTflitePrefetch = useTensorflowModelSlot(
+    "sam-decoder",
+    samVariant.decoderAsset,
+    [],
+    ready && !isSamOnnxRuntime,
+  );
+  const samEncoderOnnxPrefetch = useOnnxModelSlot(
+    "sam-encoder-onnx",
+    samVariant.encoderAsset,
+    samOnnxProviderOptions(samUseGpu),
+    ready && isSamOnnxRuntime,
+  );
+  const samDecoderOnnxPrefetch = useOnnxModelSlot(
+    "sam-decoder-onnx",
+    samVariant.decoderAsset,
+    samOnnxProviderOptions(samUseGpu),
+    ready && isSamOnnxRuntime,
+  );
+
+  // Timing for the prefetch above -- otherwise there's no visibility into
+  // whether it actually finishes before a photo gets captured (the whole
+  // point of prefetching). Clock starts when `ready` first flips true (i.e.
+  // when the prefetch actually got enabled), not screen mount, so this
+  // measures the prefetch itself, not detector load time. Keyed by
+  // (variant, useGpu) and reset whenever either changes, so cycling SAM
+  // variants mid-session (onCycleSamVariant) times each one separately
+  // instead of reporting elapsed-since-the-very-first-prefetch.
+  const samPrefetchStartRef = useRef<number | null>(null);
+  const samPrefetchKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!ready) return;
+    const key = `${samVariant.id}:${samUseGpu}`;
+    if (samPrefetchKeyRef.current !== key) {
+      samPrefetchKeyRef.current = key;
+      samPrefetchStartRef.current = Date.now();
+      console.log(
+        `[SAM] prefetch starting for ${samVariant.name} (detector ready)`,
+      );
+    }
+  }, [ready, samVariant.id, samVariant.name, samUseGpu]);
+
+  const samEncoderPrefetchState = isSamOnnxRuntime
+    ? samEncoderOnnxPrefetch.state
+    : samEncoderTflitePrefetch.state;
+  const samDecoderPrefetchState = isSamOnnxRuntime
+    ? samDecoderOnnxPrefetch.state
+    : samDecoderTflitePrefetch.state;
+
+  useEffect(() => {
+    if (samPrefetchStartRef.current == null) return;
+    const elapsed = Date.now() - samPrefetchStartRef.current;
+    if (samEncoderPrefetchState === "loaded") {
+      console.log(`[SAM] prefetch encoder loaded in ${elapsed}ms`);
+    } else if (samEncoderPrefetchState === "error") {
+      console.log(`[SAM] prefetch encoder FAILED after ${elapsed}ms`);
+    }
+  }, [samEncoderPrefetchState]);
+
+  useEffect(() => {
+    if (samPrefetchStartRef.current == null) return;
+    const elapsed = Date.now() - samPrefetchStartRef.current;
+    if (samDecoderPrefetchState === "loaded") {
+      console.log(`[SAM] prefetch decoder loaded in ${elapsed}ms`);
+    } else if (samDecoderPrefetchState === "error") {
+      console.log(`[SAM] prefetch decoder FAILED after ${elapsed}ms`);
+    }
+  }, [samDecoderPrefetchState]);
+
+  useEffect(() => {
+    if (
+      samPrefetchStartRef.current != null &&
+      samEncoderPrefetchState === "loaded" &&
+      samDecoderPrefetchState === "loaded"
+    ) {
+      console.log(
+        `[SAM] prefetch ready in ${Date.now() - samPrefetchStartRef.current}ms ` +
+          `(${samVariant.name}) -- will be a cache hit on capture from here`,
+      );
+    }
+  }, [samEncoderPrefetchState, samDecoderPrefetchState, samVariant.name]);
 
   // Adaptive FPS based on detection performance
   const [adaptiveTargetFps, setAdaptiveTargetFps] = useState(3);
@@ -665,7 +789,7 @@ const CameraPage: React.FC = () => {
           </TouchableOpacity>
         )}
         <TouchableOpacity style={styles.button} onPress={onCycleSamVariant}>
-          <Text style={styles.text}>{getSamVariant(samVariantId).shortLabel}</Text>
+          <Text style={styles.text}>{samVariant.shortLabel}</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.button}
