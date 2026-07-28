@@ -5,40 +5,19 @@ import { Detection, modelToString, toExactArrayBuffer } from "./types";
 
 /* ───────────────────── private helpers ──────────────────────── */
 
-const NUM_BBOX_FIELDS = 5;
-const STRIDES = [8, 16, 32] as const;
+const NUM_BBOX_FIELDS = 5; // cx, cy, w, h, objectness
 
-interface GridCoordinate {
-  x: number;
-  y: number;
-  stride: number;
-}
+/* Gates applied before the (cheap) score multiply. These are pre-NMS pruning
+ * knobs, NOT the user-facing confidence threshold -- that is `confThr`, passed
+ * in by the caller. Kept low so `confThr` stays the single meaningful dial;
+ * the old values (0.15 / 0.4 / 0.25) were tuned against a DOUBLE-SIGMOIDED
+ * score range and are far too aggressive now that scores are read correctly. */
+const OBJECTNESS_GATE = 0.05;
+const CLASS_GATE = 0.05;
 
-/* grid cache (per net-size) */
-const _gridCache: Record<number, GridCoordinate[]> = {};
-
-// Generate grid coordinates matching C# implementation
-function _generateGridCoordinatesWithStrides(
-  strides: readonly number[],
-  height: number,
-  width: number,
-): GridCoordinate[] {
-  "worklet";
-  const coords: GridCoordinate[] = [];
-
-  for (const stride of strides) {
-    const gridHeight = Math.floor(height / stride);
-    const gridWidth = Math.floor(width / stride);
-
-    for (let y = 0; y < gridHeight; y++) {
-      for (let x = 0; x < gridWidth; x++) {
-        coords.push({ x, y, stride });
-      }
-    }
-  }
-
-  return coords;
-}
+const MIN_BOX_FRAC = 0.015; // 1.5% of the frame
+const MAX_BOX_FRAC = 0.95;
+const MAX_PROPOSALS = 100;
 
 // Calculate intersection area (matches C# CalcInterArea)
 function _calcInterArea(a: Detection, b: Detection): number {
@@ -73,6 +52,21 @@ function _iou(a: Detection, b: Detection): number {
   return interArea / unionArea;
 }
 
+/**
+ * 180-degree rotation of the box in normalized space.
+ *
+ * DELIBERATELY LEFT UNCHANGED during the 2026-07 model swap. This compensates
+ * for how the camera frame arrives from the resizer, which is orthogonal to the
+ * model's output contract -- so the decode fixes in this file neither justify
+ * removing it nor confirm it is still right.
+ *
+ * It is, however, UNVERIFIED against the new export and cannot be checked off
+ * device. If boxes render 180 degrees out (top-left object boxed at
+ * bottom-right), delete the `.map(_flipXY)` at the end of the detector; if they
+ * render correctly, keep it and drop this note. Test with an object clearly
+ * off-centre -- a centred object looks identical either way and will tell you
+ * nothing.
+ */
 function _flipXY(box: Detection): Detection {
   "worklet";
   return {
@@ -84,31 +78,25 @@ function _flipXY(box: Detection): Detection {
   };
 }
 
-function _getGrid(w: number, h: number): GridCoordinate[] {
-  "worklet";
-  const key = w * 10000 + h;
-  if (!_gridCache[key]) {
-    _gridCache[key] = _generateGridCoordinatesWithStrides(STRIDES, h, w);
-  }
-  return _gridCache[key]!;
-}
-
-// Convert grid to flat format for native module [x, y, stride, x, y, stride, ...]
-function _gridToFlat(grid: GridCoordinate[]): Float32Array {
-  "worklet";
-  const flat = new Float32Array(grid.length * 3);
-  for (let i = 0; i < grid.length; i++) {
-    flat[i * 3] = grid[i].x;
-    flat[i * 3 + 1] = grid[i].y;
-    flat[i * 3 + 2] = grid[i].stride;
-  }
-  return flat;
-}
-
-// Generate bounding box proposals (matches C# GenerateBoundingBoxProposals)
+/**
+ * Turn the model's raw tensor into scored boxes.
+ *
+ * CONTRACT of the models exported by tools/yolox_to_tflite.py (see the .json
+ * sidecar next to each .tflite):
+ *
+ *   - boxes are ALREADY DECODED: fields 0..3 are cx, cy, w, h in INPUT PIXELS.
+ *     No grid walk, no `+ grid.x`, no `* stride`, no `Math.exp()`.
+ *   - objectness and class scores are ALREADY SIGMOID-ACTIVATED, i.e. in [0, 1].
+ *     Applying sigmoid again squeezes everything into ~[0.25, 0.53], which
+ *     silently destroys every threshold below. Verified against PyTorch by
+ *     tools/verify_tflite.py: objectness came out in [0.0000, 0.8730].
+ *
+ * The previous version of this file did BOTH of those things wrongly for the
+ * current export, which is the single biggest source of bad detections.
+ */
 function _generateBoundingBoxProposals(
   modelOutput: Float32Array,
-  gridCoords: GridCoordinate[],
+  numAnchors: number,
   numClasses: number,
   numBBoxFields: number,
   confidenceThreshold: number,
@@ -119,97 +107,71 @@ function _generateBoundingBoxProposals(
   const proposalLength = numClasses + numBBoxFields;
   const proposals: Detection[] = [];
 
-  for (let anchorIndex = 0; anchorIndex < gridCoords.length; anchorIndex++) {
-    const grid = gridCoords[anchorIndex];
+  for (let anchorIndex = 0; anchorIndex < numAnchors; anchorIndex++) {
     const startIndex = anchorIndex * proposalLength;
 
-    // Calculate coordinates and dimensions of the bounding box (matching C# logic)
-    const centerX = (modelOutput[startIndex] + grid.x) * grid.stride;
-    const centerY = (modelOutput[startIndex + 1] + grid.y) * grid.stride;
-    const w = Math.exp(modelOutput[startIndex + 2]) * grid.stride;
-    const h = Math.exp(modelOutput[startIndex + 3]) * grid.stride;
+    // Already sigmoid-activated by the graph -- read it straight.
+    const boxObjectness = modelOutput[startIndex + 4];
 
-    // Compute objectness (matching C# box_objectness)
-    // YoloX objectness should be passed through sigmoid activation - optimized
-    const rawObjectness = modelOutput[startIndex + 4];
-    const boxObjectness =
-      rawObjectness > 0
-        ? 1.0 / (1.0 + Math.exp(-rawObjectness))
-        : Math.exp(rawObjectness) / (1.0 + Math.exp(rawObjectness));
+    // Cheapest possible rejection first: most anchors die here.
+    if (boxObjectness < OBJECTNESS_GATE) continue;
 
-    let bestProb = 0;
+    let bestClassScore = 0;
     let bestClassIndex = 0;
-
-    // Compute class probabilities for each bounding box (matching C# logic) - optimized
     for (let classIndex = 0; classIndex < numClasses; classIndex++) {
-      const rawClassScore =
-        modelOutput[startIndex + numBBoxFields + classIndex];
-      // YoloX class scores should also be passed through sigmoid activation - optimized
-      const boxClassScore =
-        rawClassScore > 0
-          ? 1.0 / (1.0 + Math.exp(-rawClassScore))
-          : Math.exp(rawClassScore) / (1.0 + Math.exp(rawClassScore));
-      const boxProb = boxObjectness * boxClassScore; // Final probability
-
-      // Update the object with the highest probability and class label
-      if (boxProb > bestProb) {
+      const classScore = modelOutput[startIndex + numBBoxFields + classIndex];
+      if (classScore > bestClassScore) {
+        bestClassScore = classScore;
         bestClassIndex = classIndex;
-        bestProb = boxProb;
       }
     }
+    if (bestClassScore < CLASS_GATE) continue;
 
-    // Early exit optimizations - check cheapest conditions first
-    if (boxObjectness < 0.15) continue; // Quick objectness check (15%)
+    const bestProb = boxObjectness * bestClassScore;
+    if (bestProb < confidenceThreshold) continue;
 
-    // Skip expensive class probability calculations if we already have enough detections
-    if (proposals.length >= 50 && boxObjectness < 0.3) continue;
+    // Decoded centre/size in input pixels -> normalized corners.
+    const cx = modelOutput[startIndex];
+    const cy = modelOutput[startIndex + 1];
+    const halfW = modelOutput[startIndex + 2] * 0.5;
+    const halfH = modelOutput[startIndex + 3] * 0.5;
 
-    const bestClassScore = bestProb / boxObjectness;
-    if (bestClassScore < 0.4) continue; // Moderate class confidence (40%)
-    if (bestProb < 0.25) continue; // Minimum final probability check (25%)
+    const x1 = (cx - halfW) / netSize;
+    const y1 = (cy - halfH) / netSize;
+    const x2 = (cx + halfW) / netSize;
+    const y2 = (cy + halfH) / netSize;
 
-    // Filter by confidence threshold (matching C# where clause)
-    if (bestProb > confidenceThreshold) {
-      const halfW = w * 0.5;
-      const halfH = h * 0.5;
-      const x1 = (centerX - halfW) / netSize;
-      const y1 = (centerY - halfH) / netSize;
-      const x2 = (centerX + halfW) / netSize;
-      const y2 = (centerY + halfH) / netSize;
+    // Clamp rather than discard. The old code dropped any box touching an edge,
+    // which threw away real detections at the frame border -- poop half out of
+    // shot is still poop, and on a live camera it is about to be centred.
+    const cx1 = x1 < 0 ? 0 : x1;
+    const cy1 = y1 < 0 ? 0 : y1;
+    const cx2 = x2 > 1 ? 1 : x2;
+    const cy2 = y2 > 1 ? 1 : y2;
 
-      // Reasonable bounds and size checking
-      if (x1 < 0 || y1 < 0 || x2 > 1 || y2 > 1) continue; // Box outside image bounds
-      if (x2 - x1 < 0.015 || y2 - y1 < 0.015) continue; // Box too small (min 1.5%)
-      if (x2 - x1 > 0.9 || y2 - y1 > 0.9) continue; // Box too large (max 90%)
+    const bw = cx2 - cx1;
+    const bh = cy2 - cy1;
+    if (bw < MIN_BOX_FRAC || bh < MIN_BOX_FRAC) continue;
+    if (bw > MAX_BOX_FRAC || bh > MAX_BOX_FRAC) continue;
 
-      // Limit total proposals to prevent runaway detections - reduced for performance
-      if (proposals.length >= 100) break; // Hard limit of 100 proposals (was 200)
+    proposals.push({
+      x1: cx1,
+      y1: cy1,
+      x2: cx2,
+      y2: cy2,
+      score: bestProb,
+      classId: bestClassIndex,
+    });
 
-      const detection = {
-        x1,
-        y1,
-        x2,
-        y2,
-        score: bestProb,
-        classId: bestClassIndex,
-      };
-      proposals.push(detection);
-
-      // Log first detection for debugging
-      // if (proposals.length === 1) {
-      //   console.log(`[YoloX] First proposal: class=${bestClassIndex} conf=${bestProb.toFixed(3)} obj=${boxObjectness.toFixed(3)} size=${((x2-x1)*100).toFixed(1)}%x${((y2-y1)*100).toFixed(1)}%`)
-      // }
-    }
+    if (proposals.length >= MAX_PROPOSALS) break;
   }
 
-  // Sort by probability (matching C# OrderByDescending)
   proposals.sort((a, b) => b.score - a.score);
   return proposals;
 }
 
 function _postprocess(
   tensor: Float32Array,
-  grid: GridCoordinate[],
   netSize: number,
   numClasses: number,
   confThr: number,
@@ -217,12 +179,14 @@ function _postprocess(
 ): Detection[] {
   "worklet";
 
-  // console.log(`[YoloX] Processing ${grid.length} anchors, confThr=${confThr}, nmsThr=${nmsThr}`)
+  // Anchor count comes from the tensor itself rather than a rebuilt grid: the
+  // graph already decoded the boxes, so the only thing still needed is how many
+  // rows there are. (416 -> 3549 = 52^2 + 26^2 + 13^2; 640 -> 8400.)
+  const numAnchors = Math.floor(tensor.length / (numClasses + NUM_BBOX_FIELDS));
 
-  // Generate proposals using the same algorithm as C#
   const proposals = _generateBoundingBoxProposals(
     tensor,
-    grid,
+    numAnchors,
     numClasses,
     NUM_BBOX_FIELDS,
     confThr,
@@ -305,9 +269,6 @@ export function createYoloXNanoDetector(
   const confThr = opts.confThr ?? 0.5;
   const nmsThr = opts.nmsThr ?? 0.45;
 
-  // pre-computed grid/stride table
-  const grid = _getGrid(inSize, inSize);
-
   return (frame: Frame /* VisionCamera Frame */): Detection[] => {
     "worklet";
 
@@ -316,6 +277,11 @@ export function createYoloXNanoDetector(
     /* 1) preprocess ------------------------------------------------------ */
     const t0 = Date.now();
 
+    // The model now eats [0, 1] directly -- tools/yolox_to_tflite.py folded the
+    // x255 into the stem convolution (exact, zero runtime cost). The resizer
+    // therefore hands its NATIVE [0, 1] output straight through, and the
+    // patches/react-native-vision-camera-resizer+5.1.1.patch that multiplied by
+    // 255 in the Metal/Vulkan kernel is no longer needed. Delete that patch.
     let inputData: Float32Array;
     if (typeof resizer === "function") {
       inputData = resizer(frame, {
@@ -331,19 +297,11 @@ export function createYoloXNanoDetector(
     }
 
     const t2 = Date.now();
-    // console.log(`[YoloX] Input: float32[0,255] from native, sample: ${inputData[0]}`)
 
     /* 2) inference + postprocessing -------------------------------------- */
     const out = model.runSync([toExactArrayBuffer(inputData)]);
     const tensor = new Float32Array(out[0]!);
-    const detections = _postprocess(
-      tensor,
-      grid,
-      inSize,
-      numClasses,
-      confThr,
-      nmsThr,
-    );
+    const detections = _postprocess(tensor, inSize, numClasses, confThr, nmsThr);
     const t3 = Date.now();
 
     const t4 = Date.now();

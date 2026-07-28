@@ -11,15 +11,37 @@ export function useDetectorYoloXNanoPoop(
   preferGpu: boolean = true,
 ): UseDetectorResult {
   // Define model assets statically for require() to work
+  //
+  // poop_nano_416_float32.tflite is the 2026-07 retrain (300 epochs, tiled
+  // dataset, AP 50.56 on tiled val). Unlike the old cropped_only export it
+  // decodes boxes inside the graph, emits sigmoid-activated scores, and takes
+  // [0, 1] input -- see assets/poop_nano_416_float32.json for the full contract
+  // and yoloxNanoDetector.ts for how it is consumed.
   const modelAsset = useShitSpotterModel
     ? require("../../assets/shitspotter-custom-v5-epoch_115_float32.tflite")
-    : require("../../assets/yolox_nano_poop_cropped_only_best_float32.tflite");
+    : require("../../assets/poop_nano_416_float32.tflite");
   const inputSize = useShitSpotterModel ? 640 : 416;
 
+  // NOTE: the shitspotter model is an OLD-CONTRACT export (raw grid offsets,
+  // pre-sigmoid scores, [0, 255] input). yoloxNanoDetector.ts now implements
+  // the NEW contract only, so that variant will mis-detect until it is either
+  // re-exported through tools/yolox_to_tflite.py or given its own decoder.
+  // channelOrder MUST be "bgr", not "rgb".
+  //
+  // YOLOX's preproc() never calls cvtColor -- it takes cv2.imread output (which
+  // is BGR) and only transposes HWC->CHW. So the network was trained, validated
+  // and exported entirely in BGR. Measured on one real tile through
+  // poop_s_640_float32.tflite:
+  //
+  //     RGB input -> max obj*cls 0.0245, 0 detections above 0.7
+  //     BGR input -> max obj*cls 0.8662, 8 detections above 0.7
+  //
+  // A 35x difference. Feeding RGB does not degrade detection gracefully, it
+  // removes it: at any sane threshold the model sees nothing at all.
   const resizerState = useResizer({
     width: inputSize,
     height: inputSize,
-    channelOrder: "rgb",
+    channelOrder: "bgr",
     dataType: "float32",
     scaleMode: "cover",
     pixelLayout: "interleaved",
