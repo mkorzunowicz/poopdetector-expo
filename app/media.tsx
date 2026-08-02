@@ -217,6 +217,10 @@ const MediaPage: React.FC = () => {
   // then we fall back to the original path (loader covers the brief swap).
   const [displayUri, setDisplayUri] = useState<string | null>(null);
   const [hasMediaLoaded, setHasMediaLoaded] = useState(false);
+  // Set once the detection phase has loaded the photo into photoRef, so the
+  // SAM phase effect (below) has something to react to -- refs alone don't
+  // retrigger effects.
+  const [photoLoaded, setPhotoLoaded] = useState(false);
   const [isScreenFocused, setIsScreenFocused] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isBootstrapping, setIsBootstrapping] = useState(false);
@@ -270,6 +274,11 @@ const MediaPage: React.FC = () => {
     Awaited<ReturnType<typeof encodePhotoForSam>>["context"] | null
   >(null);
   const detectionsRef = useRef<Detection[]>([]);
+  // Guards the detection-only phase (photo load + YOLOX). Independent of SAM
+  // so a poop detection still runs and the loader still clears when
+  // automatic segmentation is off.
+  const hasDetectedRef = useRef(false);
+  // Guards the SAM encode/decode phase, which only starts once samWanted.
   const hasBootstrappedRef = useRef(false);
   // Approx model-load start (first render). Models load in parallel via the
   // hooks below, so each logs its own elapsed-since-mount when it goes ready.
@@ -412,11 +421,13 @@ const MediaPage: React.FC = () => {
   );
 
   useEffect(() => {
+    hasDetectedRef.current = false;
     hasBootstrappedRef.current = false;
     photoRef.current = null;
     embeddingsRef.current = null;
     encoderContextRef.current = null;
     setHasMediaLoaded(false);
+    setPhotoLoaded(false);
     setDisplayUri(null);
     setIsBootstrapping(false);
     setIsDecoding(false);
@@ -599,6 +610,9 @@ const MediaPage: React.FC = () => {
     ],
   );
 
+  // Detection phase: loads the photo and runs the poop detector. This must
+  // NOT depend on samWanted/samEncoderReady/samDecoderReady -- detection is
+  // useful (and the loader must clear) even with automatic segmentation off.
   useEffect(() => {
     if (
       type !== "photo" ||
@@ -606,24 +620,21 @@ const MediaPage: React.FC = () => {
       !hasMediaLoaded ||
       !isScreenFocused ||
       !detectionModel ||
-      !samWanted ||
-      !samEncoderReady ||
-      !samDecoderReady ||
-      hasBootstrappedRef.current
+      hasDetectedRef.current
     ) {
       return;
     }
 
-    hasBootstrappedRef.current = true;
+    hasDetectedRef.current = true;
     let isCancelled = false;
 
-    const bootstrap = async () => {
+    const detect = async () => {
       const startTime = Date.now();
       setIsBootstrapping(true);
       setErrorText(null);
 
       try {
-        logMediaSamUi("bootstrap begin", { path, type });
+        logMediaSamUi("detection begin", { path, type });
         setStatusText("Loading photo...");
         const photo = await loadPhotoImage(path);
         if (isCancelled) return;
@@ -631,6 +642,7 @@ const MediaPage: React.FC = () => {
         photoRef.current = photo;
         setDisplayUri(photo.displayUri);
         setPhotoSize({ width: photo.width, height: photo.height });
+        setPhotoLoaded(true);
 
         setStatusText("Detecting poop...");
         const nextDetections = detectPoopInPhoto(detectionModel, photo.image, {
@@ -647,7 +659,76 @@ const MediaPage: React.FC = () => {
           detections: nextDetections,
           elapsedMs: Date.now() - startTime,
         });
+        if (!samWanted) {
+          setStatusText("Ready.");
+        }
+      } catch (error) {
+        logMediaSamUiError("detection failed", error, {
+          elapsedMs: Date.now() - startTime,
+          path,
+          type,
+        });
+        const message =
+          error instanceof Error
+            ? `Failed to prepare photo: ${error.message}`
+            : "Failed to prepare photo.";
+        setErrorText(message);
+        setStatusText(message);
+      } finally {
+        if (!isCancelled) {
+          setIsBootstrapping(false);
+        }
+      }
+    };
 
+    void detect();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [
+    detectionModel,
+    hasMediaLoaded,
+    isScreenFocused,
+    path,
+    poopModel.confThr,
+    poopModel.newContract,
+    poopModel.size,
+    samWanted,
+    type,
+  ]);
+
+  // SAM phase: encodes the already-loaded photo and decodes the initial mask.
+  // Only starts once samWanted (auto or manually requested) AND the encoder
+  // and decoder models are ready -- reuses the photo the detection phase
+  // already loaded rather than reloading it.
+  useEffect(() => {
+    if (
+      type !== "photo" ||
+      !path ||
+      !photoLoaded ||
+      !samWanted ||
+      !samEncoderReady ||
+      !samDecoderReady ||
+      hasBootstrappedRef.current
+    ) {
+      return;
+    }
+    const photo = photoRef.current;
+    if (!photo) {
+      return;
+    }
+
+    hasBootstrappedRef.current = true;
+    let isCancelled = false;
+
+    const bootstrapSam = async () => {
+      const startTime = Date.now();
+      setIsBootstrapping(true);
+      setErrorText(null);
+
+      try {
+        logMediaSamUi("SAM bootstrap begin", { path, type });
         setStatusText(`Encoding ${samVariant.name}...`);
         await yieldToUi();
         const onEncodeProgress = async (message: string) => {
@@ -692,23 +773,23 @@ const MediaPage: React.FC = () => {
 
         const seededPoints = savedSegmentation?.points.length
           ? savedSegmentation.points
-          : [getInitialSamPoint(nextDetections)];
+          : [getInitialSamPoint(detectionsRef.current)];
 
         setPoints(seededPoints);
         setStatusText("Decoding initial SAM mask...");
         await yieldToUi();
         await runSegmentation(seededPoints);
-        logMediaSamUi("bootstrap complete", {
+        logMediaSamUi("SAM bootstrap complete", {
           elapsedMs: Date.now() - startTime,
           seededPointCount: seededPoints.length,
         });
         logSamUi(
           `Ready in ${Date.now() - startTime}ms ` +
-            `(${nextDetections.length} detection${nextDetections.length === 1 ? "" : "s"}, ` +
+            `(${detectionsRef.current.length} detection${detectionsRef.current.length === 1 ? "" : "s"}, ` +
             `${samVariant.name})`,
         );
       } catch (error) {
-        logMediaSamUiError("bootstrap failed", error, {
+        logMediaSamUiError("SAM bootstrap failed", error, {
           elapsedMs: Date.now() - startTime,
           path,
           type,
@@ -726,23 +807,22 @@ const MediaPage: React.FC = () => {
       }
     };
 
-    void bootstrap();
+    void bootstrapSam();
 
     return () => {
       isCancelled = true;
     };
   }, [
-    detectionModel,
-    hasMediaLoaded,
     isOnnxRuntime,
-    isScreenFocused,
     path,
+    photoLoaded,
     runSegmentation,
     samDecoderReady,
     samEncoderModel,
     samEncoderModelOnnx,
     samEncoderReady,
     samVariant,
+    samWanted,
     type,
   ]);
 
@@ -842,12 +922,15 @@ const MediaPage: React.FC = () => {
   // classification needed here. Multiple disconnected objects just become
   // multiple independent (non-nested, so all "even") subpaths.
   const canInteract = type === "photo" && imageRect != null && !isBootstrapping;
+  // SAM readiness only gates the loader while SAM is actually wanted --
+  // otherwise turning automatic segmentation off left samEncoderReady/
+  // samDecoderReady permanently false (those model slots are never loaded)
+  // and the loader never cleared, even though detection had long finished.
   const showLoader =
     type === "photo" &&
     modelError == null &&
     (detectionModelHook.state !== "loaded" ||
-      !samEncoderReady ||
-      !samDecoderReady ||
+      (samWanted && (!samEncoderReady || !samDecoderReady)) ||
       isBootstrapping ||
       isDecoding);
 
@@ -962,7 +1045,10 @@ const MediaPage: React.FC = () => {
                   styles.saveButton,
                   { backgroundColor: theme.colors.primary, flex: 1 },
                 ]}
-                onPress={() => setSamRequested(true)}
+                onPress={() => {
+                  setStatusText(`Loading ${samVariant.name}...`);
+                  setSamRequested(true);
+                }}
               >
                 <Text style={styles.saveButtonText}>
                   {tr("Media.runSegmentation")}
