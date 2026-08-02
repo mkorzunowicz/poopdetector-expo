@@ -19,6 +19,12 @@ const MIN_BOX_FRAC = 0.015; // 1.5% of the frame
 const MAX_BOX_FRAC = 0.95;
 const MAX_PROPOSALS = 100;
 
+/* One-shot flag for the input-range log below. Held as an OBJECT PROPERTY, not
+ * a bare `let`: the worklet runtime captures module-scope bindings by value, so
+ * assigning to a plain `let` from inside the frame processor would not stick and
+ * the message would repeat on every frame. Mutating a captured object does. */
+const _diag = { logged: false };
+
 // Calculate intersection area (matches C# CalcInterArea)
 function _calcInterArea(a: Detection, b: Detection): number {
   "worklet";
@@ -301,6 +307,66 @@ export function createYoloXNanoDetector(
     /* 2) inference + postprocessing -------------------------------------- */
     const out = model.runSync([toExactArrayBuffer(inputData)]);
     const tensor = new Float32Array(out[0]!);
+
+    /* 2b) one-time self-check -------------------------------------------- */
+    // "Confident garbage" has two common causes that look identical on screen:
+    //   (a) input-range mismatch -- a [0,1] model fed [0,255] saturates
+    //   (b) an OLD-CONTRACT model -- raw grid offsets read as pixels, and raw
+    //       logits read as probabilities
+    // Neither shows up in any other log line, so measure both once and name the
+    // culprit explicitly instead of leaving it to inspection of the boxes.
+    if (!_diag.logged) {
+      _diag.logged = true;
+
+      let inLo = Infinity;
+      let inHi = -Infinity;
+      for (let i = 0; i < inputData.length; i += 997) {
+        const v = inputData[i];
+        if (v < inLo) inLo = v;
+        if (v > inHi) inHi = v;
+      }
+
+      // Sample the box + objectness fields across the whole tensor.
+      const stride = numClasses + NUM_BBOX_FIELDS;
+      let boxHi = 0;
+      let objLo = Infinity;
+      let objHi = -Infinity;
+      for (let a = 0; a < tensor.length / stride; a += 7) {
+        const s = a * stride;
+        for (let f = 0; f < 4; f++) {
+          const v = Math.abs(tensor[s + f]);
+          if (v > boxHi) boxHi = v;
+        }
+        const o = tensor[s + 4];
+        if (o < objLo) objLo = o;
+        if (o > objHi) objHi = o;
+      }
+
+      const inputLooks255 = inHi > 1.5;
+      // Decoded boxes span the input resolution; raw grid offsets stay tiny.
+      const boxesDecoded = boxHi > inSize * 0.25;
+      // Sigmoid output is bounded; logits are not.
+      const scoresActivated = objLo >= -0.001 && objHi <= 1.001;
+
+      console.log(
+        `[YoloX] SELF-CHECK\n` +
+          `  input range   ${inLo.toFixed(3)}..${inHi.toFixed(3)}  -> ${inputLooks255 ? "[0,255]" : "[0,1]"}\n` +
+          `  box field max ${boxHi.toFixed(1)}  -> ${boxesDecoded ? "decoded pixels (new)" : "RAW GRID OFFSETS (old model!)"}\n` +
+          `  objectness    ${objLo.toFixed(3)}..${objHi.toFixed(3)}  -> ${scoresActivated ? "sigmoid applied (new)" : "RAW LOGITS (old model!)"}\n` +
+          `  model expects ${inputLooks255 ? "poop_nano_416_range255_float32.tflite" : "poop_nano_416_float32.tflite"}` +
+          ` (NATIVE_BUILD_STILL_HAS_X255_PATCH = ${inputLooks255})`,
+      );
+
+      if (!boxesDecoded || !scoresActivated) {
+        console.log(
+          `[YoloX] *** WRONG MODEL LOADED. This build is running an OLD-CONTRACT ` +
+            `export through the NEW decoder, which produces confident boxes in ` +
+            `meaningless places. Rebuild so assets/poop_nano_416*.tflite is the ` +
+            `bundled asset. ***`,
+        );
+      }
+    }
+
     const detections = _postprocess(tensor, inSize, numClasses, confThr, nmsThr);
     const t3 = Date.now();
 
