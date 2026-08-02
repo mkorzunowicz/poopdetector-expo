@@ -32,6 +32,19 @@ export const DETECTOR_NAMES = [
   "poop-yolox-nano",
   "poop-yolox-s1024",
   "poop-yolox-s1024-v3",
+  // Same nano weights at four precisions -- for measuring DELEGATE x PRECISION
+  // on device. Accuracy is identical across the first three, so any frame-time
+  // difference is the runtime rather than the model. nano-int8 detects NOTHING
+  // (full-int8 breaks the decoded output tensor); it is here to time int8
+  // throughput only.
+  "nano-fp32",
+  "nano-fp16",
+  "nano-int8dr",
+  "nano-int8-TIMING-ONLY",
+  // Same for the v3 model that will actually ship -- s1024-v3 above IS the
+  // int8dr build, these are its fp16 and fp32 siblings.
+  "s1024-v3-fp16",
+  "s1024-v3-fp32",
 ] as const;
 export type DetectorName = (typeof DETECTOR_NAMES)[number];
 
@@ -40,6 +53,12 @@ const VARIANT_BY_NAME: Record<DetectorName, PoopModelVariant> = {
   "poop-yolox-s1024": "s-1024",
   "poop-yolox-s1024-v3": "s-1024-v3",
   shitspotter: "shitspotter",
+  "nano-fp32": "nano-fp32",
+  "nano-fp16": "nano-fp16",
+  "nano-int8dr": "nano-int8dr",
+  "nano-int8-TIMING-ONLY": "nano-int8",
+  "s1024-v3-fp16": "s-1024-v3-fp16",
+  "s1024-v3-fp32": "s-1024-v3-fp32",
 };
 
 export function useDetector(

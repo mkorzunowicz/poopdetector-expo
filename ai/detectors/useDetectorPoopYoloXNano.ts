@@ -48,8 +48,14 @@ const NATIVE_BUILD_STILL_HAS_X255_PATCH = false;
 /** Which model this detector instance should load. */
 export type PoopModelVariant =
   | "nano-416"
+  | "nano-fp32"
+  | "nano-fp16"
+  | "nano-int8dr"
+  | "nano-int8"
   | "s-1024"
   | "s-1024-v3"
+  | "s-1024-v3-fp16"
+  | "s-1024-v3-fp32"
   | "shitspotter";
 
 /**
@@ -70,6 +76,54 @@ const MODELS: Record<
     size: 416,
     confThr: 0.4,
     note: "live-camera model, 2026-07 retrain, AP 50.6 on tiled val",
+  },
+  // ---- nano @416, same weights, four precisions ------------------------- //
+  // Here to measure DELEGATE x PRECISION on real devices. Nano is the right
+  // vehicle: accuracy is identical across the first three, so any difference in
+  // frame time is the runtime, not the model. Desktop CPU baseline, 8 threads
+  // (tools/bench_quant.py, 240 images):
+  //
+  //   float32   3.5 MB   30.4 ms   1.00x   F1 0.514
+  //   float16   1.8 MB   29.6 ms   1.03x   F1 0.509
+  //   int8dr    1.1 MB   41.8 ms   0.73x   F1 0.520   <- SLOWER than float32
+  //   int8      1.2 MB   20.8 ms   1.46x   F1 0.000   <- broken, speed only
+  //
+  // int8dr being slower here is not a mistake: quantize/dequantize overhead is
+  // roughly per-op and fixed, while the compute saving scales with model size.
+  // At the nano's 1.11 GFLOPs the overhead wins; at s@1024's 68.9 GFLOPs int8dr
+  // is 1.91x FASTER. Quantization is not universally a win -- measure per model.
+  //
+  // Field observation on device: float32 is fast on CoreML while int8 is very
+  // slow, because CoreML/GPU execute float natively and must dequantize (or fall
+  // back to CPU) for int8. So the best precision depends on the DELEGATE too.
+  "nano-fp32": {
+    asset: require("../../assets/poop_nano_416_v2_float32.tflite"),
+    size: 416,
+    confThr: 0.4,
+    note: "nano fp32 -- baseline; fastest on CoreML/GPU",
+  },
+  "nano-fp16": {
+    asset: require("../../assets/poop_nano_416_v2_float16.tflite"),
+    size: 416,
+    confThr: 0.4,
+    note: "nano fp16 -- half the file, GPUs compute fp16 natively",
+  },
+  "nano-int8dr": {
+    asset: require("../../assets/poop_nano_416_v2_int8dr.tflite"),
+    size: 416,
+    confThr: 0.4,
+    note: "nano int8 dynamic-range -- 1.1 MB; slower than fp32 on desktop CPU",
+  },
+  "nano-int8": {
+    // SPEED MEASUREMENT ONLY -- this model does not detect anything.
+    // --decode puts pixel coords (0..1024) and probabilities (0..1) in one output
+    // tensor; per-tensor int8 picks a single scale and every probability
+    // collapses to the same value. Measured F1 0.000. Kept so the delegate's
+    // int8 throughput can be timed; do not judge detections from it.
+    asset: require("../../assets/poop_nano_416_v2_int8.tflite"),
+    size: 416,
+    confThr: 0.4,
+    note: "nano full-int8 -- TIMING ONLY, detects nothing (F1 0.000)",
   },
   "s-1024": {
     // yolox-s trained natively at 1024 on the MULTI-SCALE tile set. Roughly 60x
@@ -105,6 +159,31 @@ const MODELS: Record<
     size: 1024,
     confThr: 0.5,
     note: "v3 ep100 int8dr -- best measured: F1 0.902, indoor FP 0.1%",
+  },
+  // Same v3 ep100 weights at the other two precisions, so DELEGATE x PRECISION
+  // can be compared on the model that will actually ship. Desktop CPU baseline,
+  // 8 threads, 240 images -- all three are behaviourally identical:
+  //
+  //   float32   34.4 MB   182.9 ms   1.00x   F1 0.819   drift -
+  //   float16   17.2 MB   181.6 ms   1.01x   F1 0.819   drift 0.0001  corr 1.000
+  //   int8dr     9.0 MB    92.6 ms   1.97x   F1 0.819   drift 0.0065  corr 0.999
+  //
+  // On CPU int8dr wins outright at this model size. On CoreML/GPU the field test
+  // showed the reverse -- float runs natively there and int8 must be dequantized
+  // or falls back to CPU. fp16 is the one to try on the accelerated path: GPUs
+  // compute fp16 natively, so it should match fp32's speed at half the file size
+  // and half the load time.
+  "s-1024-v3-fp16": {
+    asset: require("../../assets/poop_s1024_v3_ep100_float16.tflite"),
+    size: 1024,
+    confThr: 0.5,
+    note: "v3 ep100 fp16 -- 17 MB, expected best on CoreML/GPU",
+  },
+  "s-1024-v3-fp32": {
+    asset: require("../../assets/poop_s1024_v3_ep100_float32.tflite"),
+    size: 1024,
+    confThr: 0.5,
+    note: "v3 ep100 fp32 -- 34 MB, the reference precision",
   },
   shitspotter: {
     // OLD-CONTRACT export (raw grid offsets, pre-sigmoid scores, [0,255] input).

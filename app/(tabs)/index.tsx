@@ -312,6 +312,19 @@ const CameraPage: React.FC = () => {
   const [selected, setSelected] = useState<DetectorName>("poop-yolox-nano");
   const { detect, ready } = useDetector(selected, detectorUseGpu);
 
+  /**
+   * SAM prefetch master switch -- OFF while benchmarking detectors.
+   *
+   * The prefetch loads a multi-hundred-MB encoder + decoder in the background as
+   * soon as the detector reports ready. That is right for normal use (it hides
+   * the SAM load behind the time a user spends framing a shot) but it competes
+   * for CPU, memory bandwidth and thermal headroom with whatever the detector is
+   * doing, which contaminates any frame-time measurement taken on this screen.
+   *
+   * Set back to true when done comparing precisions/delegates.
+   */
+  const PREFETCH_SAM = false;
+
   // Prefetch: start loading the currently-selected SAM model through the
   // SAME role-scoped cache app/media.tsx uses (ai/tfliteModelCache.ts /
   // ai/onnxModelCache.ts) with the SAME delegate/options computation
@@ -332,25 +345,25 @@ const CameraPage: React.FC = () => {
     "sam-encoder",
     samVariant.encoderAsset,
     samEncoderTfliteDelegates(samUseGpu),
-    ready && !isSamOnnxRuntime,
+    PREFETCH_SAM && ready && !isSamOnnxRuntime,
   );
   const samDecoderTflitePrefetch = useTensorflowModelSlot(
     "sam-decoder",
     samVariant.decoderAsset,
     [],
-    ready && !isSamOnnxRuntime,
+    PREFETCH_SAM && ready && !isSamOnnxRuntime,
   );
   const samEncoderOnnxPrefetch = useOnnxModelSlot(
     "sam-encoder-onnx",
     samVariant.encoderAsset,
     samOnnxProviderOptions(samUseGpu),
-    ready && isSamOnnxRuntime,
+    PREFETCH_SAM && ready && isSamOnnxRuntime,
   );
   const samDecoderOnnxPrefetch = useOnnxModelSlot(
     "sam-decoder-onnx",
     samVariant.decoderAsset,
     samOnnxProviderOptions(samUseGpu),
-    ready && isSamOnnxRuntime,
+    PREFETCH_SAM && ready && isSamOnnxRuntime,
   );
 
   // Timing for the prefetch above -- otherwise there's no visibility into
