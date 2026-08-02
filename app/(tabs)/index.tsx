@@ -236,16 +236,26 @@ const CameraPage: React.FC = () => {
   const samVariant = useMemo(() => getSamVariant(samVariantId), [samVariantId]);
   const isSamOnnxRuntime = samVariant.runtime === "onnx-nitro";
 
+  // Declared here rather than next to the detector hook below because
+  // onMediaCaptured now forwards it to the photo screen, and a useCallback
+  // dependency array is evaluated during render -- referencing a `const`
+  // declared further down would be a temporal-dead-zone error.
+  const [selected, setSelected] = useState<DetectorName>("poop-yolox-nano");
+
   const onMediaCaptured = useCallback(
     (filePath: string, type: "photo" | "video") => {
       console.log(
         `Media captured! ${filePath} (sam=${samVariantId}, detectorGpu=${detectorUseGpu}, samGpu=${samUseGpu})`,
       );
       router.push(
-        `/media?path=${encodeURIComponent(filePath)}&type=${type}&sam=${samVariantId}&detectorGpu=${detectorUseGpu ? "1" : "0"}&samGpu=${samUseGpu ? "1" : "0"}`,
+        // `detector` carries the camera screen's model choice to the photo
+        // screen. Without it media.tsx fell back to a hardcoded 2024 export --
+        // the weakest model measured (F1 0.471, 39% false alarms on indoor
+        // photos) -- so the picker here had no effect at all after the shutter.
+        `/media?path=${encodeURIComponent(filePath)}&type=${type}&sam=${samVariantId}&detector=${selected}&detectorGpu=${detectorUseGpu ? "1" : "0"}&samGpu=${samUseGpu ? "1" : "0"}`,
       );
     },
-    [samVariantId, detectorUseGpu, samUseGpu],
+    [samVariantId, selected, detectorUseGpu, samUseGpu],
   );
   const onFlipCameraPressed = useCallback(() => {
     setCameraPosition((p) => (p === "back" ? "front" : "back"));
@@ -309,7 +319,6 @@ const CameraPage: React.FC = () => {
   /*  Shared detections state that the overlay will render               */
   const [detections, setDetections] = useState<Detection[]>([]);
 
-  const [selected, setSelected] = useState<DetectorName>("poop-yolox-nano");
   const { detect, ready } = useDetector(selected, detectorUseGpu);
 
   /**

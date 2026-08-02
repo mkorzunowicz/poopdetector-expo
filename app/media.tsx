@@ -12,6 +12,12 @@ import {
 } from "@/ai/mobileSamPhoto";
 import { useOnnxModelSlot } from "@/ai/onnxModelCache";
 import {
+  resolvePoopModel,
+  type PoopModelVariant,
+} from "@/ai/detectors/useDetectorPoopYoloXNano";
+import { NEW_CONTRACT, OLD_CONTRACT } from "@/ai/mobileSamPhoto";
+import { useAutoSam } from "@/hooks/useAutoSam";
+import {
   samEncoderTfliteDelegates,
   samOnnxProviderOptions,
   TFLITE_GPU_DELEGATES,
@@ -57,7 +63,27 @@ import {
   View,
 } from "react-native";
 
-const DETECTION_MODEL_ASSET = require("../assets/yolox_nano_poop_cropped_only_best_float32.tflite");
+/**
+ * Maps the `detector` route param (a DetectorName from the camera screen's
+ * picker) to the model variant the shared registry knows about.
+ *
+ * This screen used to hardcode `yolox_nano_poop_cropped_only_best_float32` --
+ * the WEAKEST model measured (F1 0.471, precision 0.387, and it fires on 39.2%
+ * of indoor photos, versus 0.902 / 0.933 / 0.1% for v3). The picker on the
+ * camera screen had no effect here at all.
+ */
+const VARIANT_BY_DETECTOR_NAME: Record<string, PoopModelVariant> = {
+  "poop-yolox-nano": "nano-416",
+  "poop-yolox-s1024": "s-1024",
+  "poop-yolox-s1024-v3": "s-1024-v3",
+  shitspotter: "shitspotter",
+  "nano-fp32": "nano-fp32",
+  "nano-fp16": "nano-fp16",
+  "nano-int8dr": "nano-int8dr",
+  "nano-int8-TIMING-ONLY": "nano-int8",
+  "s1024-v3-fp16": "s-1024-v3-fp16",
+  "s1024-v3-fp32": "s-1024-v3-fp32",
+};
 
 function getContainedImageRect(
   containerWidth: number,
@@ -163,16 +189,29 @@ function logMediaSamUiError(
 }
 
 const MediaPage: React.FC = () => {
-  const { path, type, sam, detectorGpu, samGpu } = useLocalSearchParams<{
-    path: string;
-    type: "photo" | "video";
-    sam?: string;
-    detectorGpu?: string;
-    samGpu?: string;
-  }>();
+  const { path, type, sam, detector, detectorGpu, samGpu } =
+    useLocalSearchParams<{
+      path: string;
+      type: "photo" | "video";
+      sam?: string;
+      detector?: string;
+      detectorGpu?: string;
+      samGpu?: string;
+    }>();
   // Which SAM pair to run -- chosen on the camera screen before capture and
   // passed along; falls back to the default variant for older links.
   const samVariant = useMemo(() => getSamVariant(sam), [sam]);
+  const detectorUseGpuEarly = detectorGpu === "1";
+  // Resolve the camera screen's pick through the SHARED registry so the two
+  // screens cannot drift apart. Unknown/absent -> the live default.
+  const poopModel = useMemo(
+    () =>
+      resolvePoopModel(
+        VARIANT_BY_DETECTOR_NAME[detector ?? ""] ?? "nano-416",
+        detectorUseGpuEarly,
+      ),
+    [detector, detectorUseGpuEarly],
+  );
   // URI of the orientation-normalized copy Nitro decoded; the <Image> renders
   // this once bootstrap produces it so display and mask share one frame. Until
   // then we fall back to the original path (loader covers the brief swap).
@@ -187,6 +226,20 @@ const MediaPage: React.FC = () => {
   const [detections, setDetections] = useState<Detection[]>([]);
   const [points, setPoints] = useState<SamPoint[]>([]);
   const [pointMode, setPointMode] = useState<0 | 1>(1);
+
+  /**
+   * Segmentation gating. `autoSam` is the persisted profile setting; `samRequested`
+   * is this screen's manual override once the user taps Segment.
+   *
+   * When auto is OFF the SAM models must not merely stay hidden -- they must not
+   * LOAD. Encoder + decoder are tens to hundreds of MB and several seconds of
+   * init, and a user who only wants a detection box should not pay for a
+   * segmentation stack they never asked for. `samWanted` therefore feeds the
+   * `enabled` flag of every model slot below, not just the rendering.
+   */
+  const [autoSam] = useAutoSam();
+  const [samRequested, setSamRequested] = useState(false);
+  const samWanted = autoSam || samRequested;
   const [polygons, setPolygons] = useState<Array<Array<{ x: number; y: number }>>>(
     [],
   );
@@ -228,7 +281,7 @@ const MediaPage: React.FC = () => {
   // already a cache hit by the time a photo is captured. See
   // ai/tfliteModelCache.ts.
   const detectionModelHook = useCachedTensorflowModel(
-    DETECTION_MODEL_ASSET,
+    poopModel.asset,
     detectorUseGpu ? TFLITE_GPU_DELEGATES : [],
   );
   const isOnnxRuntime = samVariant.runtime === "onnx-nitro";
@@ -250,7 +303,7 @@ const MediaPage: React.FC = () => {
     "sam-encoder",
     samVariant.encoderAsset,
     samEncoderTfliteDelegates(samUseGpu),
-    !isOnnxRuntime,
+    samWanted && !isOnnxRuntime,
   );
   // Decoder is ALWAYS CPU, regardless of the SAM: CPU/GPU toggle -- confirmed
   // on-device (Android) that the GPU delegate here returns an empty mask
@@ -263,19 +316,19 @@ const MediaPage: React.FC = () => {
     "sam-decoder",
     samVariant.decoderAsset,
     [],
-    !isOnnxRuntime,
+    samWanted && !isOnnxRuntime,
   );
   const samEncoderOnnxHook = useOnnxModelSlot(
     "sam-encoder-onnx",
     samVariant.encoderAsset,
     samOnnxProviderOptions(samUseGpu),
-    isOnnxRuntime,
+    samWanted && isOnnxRuntime,
   );
   const samDecoderOnnxHook = useOnnxModelSlot(
     "sam-decoder-onnx",
     samVariant.decoderAsset,
     samOnnxProviderOptions(samUseGpu),
-    isOnnxRuntime,
+    samWanted && isOnnxRuntime,
   );
 
   const detectionModel =
@@ -376,6 +429,7 @@ const MediaPage: React.FC = () => {
     setMaskScore(null);
     setStatusText("Loading models...");
     setErrorText(null);
+    setSamRequested(false);
   }, [path, type, sam, detectorUseGpu, samUseGpu]);
 
   // Prefer the orientation-normalized copy once bootstrap has produced it; fall
@@ -552,6 +606,7 @@ const MediaPage: React.FC = () => {
       !hasMediaLoaded ||
       !isScreenFocused ||
       !detectionModel ||
+      !samWanted ||
       !samEncoderReady ||
       !samDecoderReady ||
       hasBootstrappedRef.current
@@ -578,7 +633,13 @@ const MediaPage: React.FC = () => {
         setPhotoSize({ width: photo.width, height: photo.height });
 
         setStatusText("Detecting poop...");
-        const nextDetections = detectPoopInPhoto(detectionModel, photo.image);
+        const nextDetections = detectPoopInPhoto(detectionModel, photo.image, {
+          inputSize: poopModel.size,
+          confThr: poopModel.confThr,
+          // MUST match the export or the decode silently produces confident
+          // boxes in meaningless places -- see YoloxContract.
+          contract: poopModel.newContract ? NEW_CONTRACT : OLD_CONTRACT,
+        });
         if (isCancelled) return;
         setDetections(nextDetections);
         logMediaSamUi("Photo detection complete", {
@@ -891,32 +952,51 @@ const MediaPage: React.FC = () => {
             </View>
           </View>
 
-          <View style={styles.segmentationControls}>
-            <TouchableOpacity
-              style={[
-                styles.modeButton,
-                pointMode === 1 && styles.modeButtonPositiveActive,
-              ]}
-              onPress={() => setPointMode(1)}
-            >
-              <Text style={styles.modeButtonText}>Positive</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                styles.modeButton,
-                pointMode === 0 && styles.modeButtonNegativeActive,
-              ]}
-              onPress={() => setPointMode(0)}
-            >
-              <Text style={styles.modeButtonText}>Negative</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.clearButton}
-              onPress={handleClearPoints}
-            >
-              <Text style={styles.clearButtonText}>Clear points</Text>
-            </TouchableOpacity>
-          </View>
+          {/* With automatic segmentation off, nothing SAM-related has loaded
+              yet -- offer to start it. The point controls are meaningless until
+              an embedding exists, so they stay hidden rather than disabled. */}
+          {!samWanted ? (
+            <View style={styles.segmentationControls}>
+              <TouchableOpacity
+                style={[
+                  styles.saveButton,
+                  { backgroundColor: theme.colors.primary, flex: 1 },
+                ]}
+                onPress={() => setSamRequested(true)}
+              >
+                <Text style={styles.saveButtonText}>
+                  {tr("Media.runSegmentation")}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <View style={styles.segmentationControls}>
+              <TouchableOpacity
+                style={[
+                  styles.modeButton,
+                  pointMode === 1 && styles.modeButtonPositiveActive,
+                ]}
+                onPress={() => setPointMode(1)}
+              >
+                <Text style={styles.modeButtonText}>Positive</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.modeButton,
+                  pointMode === 0 && styles.modeButtonNegativeActive,
+                ]}
+                onPress={() => setPointMode(0)}
+              >
+                <Text style={styles.modeButtonText}>Negative</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.clearButton}
+                onPress={handleClearPoints}
+              >
+                <Text style={styles.clearButtonText}>Clear points</Text>
+              </TouchableOpacity>
+            </View>
+          )}
 
           <TouchableOpacity
             style={[

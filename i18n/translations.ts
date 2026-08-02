@@ -87,6 +87,7 @@ export const translations = {
       saveFailed: "Failed to save photo",
       permissionDenied: "Media library permission denied",
       permissionNeeded: "Media library access is needed to save photos",
+      runSegmentation: "Segment",
     },
     Camera: {
       initializingCamera: "Initializing camera...",
@@ -113,6 +114,10 @@ export const translations = {
       lightMode: "Light Mode",
       darkMode: "Dark Mode",
       language: "Language",
+      detection: "Detection",
+      autoSam: "Automatic segmentation",
+      autoSamOn: "SAM runs as soon as a photo is taken",
+      autoSamOff: "SAM is only loaded when you tap Segment",
     },
     OnboardingScreen: {
       welcome: "Welcome to Object Detector",
@@ -236,6 +241,7 @@ export const translations = {
       saveFailed: "Nie udało się zapisać zdjęcia",
       permissionDenied: "Odmówiono dostępu do biblioteki multimediów",
       permissionNeeded: "Dostęp do biblioteki multimediów jest potrzebny do zapisywania zdjęć",
+      runSegmentation: "Segmentuj",
     },
     Camera: {
       initializingCamera: "Inicjalizacja kamery...",
@@ -262,6 +268,10 @@ export const translations = {
       lightMode: "Tryb Jasny",
       darkMode: "Tryb Ciemny",
       language: "Język",
+      detection: "Detekcja",
+      autoSam: "Automatyczna segmentacja",
+      autoSamOn: "SAM uruchamia się zaraz po zrobieniu zdjęcia",
+      autoSamOff: "SAM ładuje się dopiero po naciśnięciu Segmentuj",
     },
     OnboardingScreen: {
       welcome: "Witamy w Detektorze Obiektów",

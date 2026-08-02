@@ -56,6 +56,7 @@ export type PoopModelVariant =
   | "s-1024-v3"
   | "s-1024-v3-fp16"
   | "s-1024-v3-fp32"
+  | "nano-original"
   | "shitspotter";
 
 /**
@@ -67,9 +68,30 @@ export type PoopModelVariant =
  */
 const MODELS: Record<
   PoopModelVariant,
-  { asset: number; size: number; confThr: number; note: string }
+  {
+    /** used when no delegate-specific asset is given */
+    asset: number;
+    /** optional: preferred build when a GPU/CoreML delegate is requested */
+    assetGpu?: number;
+    /** optional: preferred build on the CPU path */
+    assetCpu?: number;
+    size: number;
+    confThr: number;
+    note: string;
+    /** false = 2024-era export: raw grid offsets and [0,255] input. Omitted
+     *  means true (produced by tools/yolox_to_tflite.py). Only the photo path
+     *  reads this -- the live worklet decoder implements the new contract only. */
+    newContract?: boolean;
+  }
 > = {
   "nano-416": {
+    // The live default -- precision now follows the delegate:
+    //   GPU -> fp32   (52ms/frame, hits the 10 FPS cap)
+    //   CPU -> int8dr (158ms vs 237ms for fp32, and 1.1 MB vs 3.5 MB)
+    // `asset` stays as the fallback for the x255-patched-build case, which only
+    // exists as a float32 export.
+    assetGpu: require("../../assets/poop_nano_416_v2_float32.tflite"),
+    assetCpu: require("../../assets/poop_nano_416_v2_int8dr.tflite"),
     asset: NATIVE_BUILD_STILL_HAS_X255_PATCH
       ? require("../../assets/poop_nano_416_range255_float32.tflite")
       : require("../../assets/poop_nano_416_float32.tflite"),
@@ -155,10 +177,15 @@ const MODELS: Record<
     // negatives, which is what removed the false positives on indoor objects.
     // Those negatives also pushed scores DOWN, hence confThr 0.5 rather than the
     // 0.6 the v1 model wanted.
+    // Same delegate-aware choice. On-device Android CPU: int8dr ~1320ms vs
+    // ~2110ms for fp32/fp16. Either way this is a verification model, not a live
+    // one -- 1.3s per frame is fine for a one-shot check, not for a viewfinder.
+    assetGpu: require("../../assets/poop_s1024_v3_ep100_float32.tflite"),
+    assetCpu: require("../../assets/poop_s1024_v3_ep100_int8dr.tflite"),
     asset: require("../../assets/poop_s1024_v3_ep100_int8dr.tflite"),
     size: 1024,
     confThr: 0.5,
-    note: "v3 ep100 int8dr -- best measured: F1 0.902, indoor FP 0.1%",
+    note: "v3 ep100 -- best measured: F1 0.902, indoor FP 0.1%",
   },
   // Same v3 ep100 weights at the other two precisions, so DELEGATE x PRECISION
   // can be compared on the model that will actually ship. Desktop CPU baseline,
@@ -193,7 +220,19 @@ const MODELS: Record<
     asset: require("../../assets/shitspotter-custom-v5-epoch_115_float32.tflite"),
     size: 640,
     confThr: 0.4,
+    newContract: false,
     note: "Erotemic's model -- OLD CONTRACT, currently mis-decoded",
+  },
+  "nano-original": {
+    // The 2024 model that used to be hardcoded in app/media.tsx, kept selectable
+    // so the photo path can still be compared against what it used to run.
+    // Weakest model measured on benchmark_shared: F1 0.471, precision 0.387,
+    // and it fires on 39.2% of indoor photos. Old contract.
+    asset: require("../../assets/yolox_nano_poop_cropped_only_best_float32.tflite"),
+    size: 416,
+    confThr: 0.4,
+    newContract: false,
+    note: "2024 original -- OLD CONTRACT, F1 0.471, 39% indoor false alarms",
   },
 };
 
@@ -202,8 +241,28 @@ export function useDetectorYoloXNanoPoop(
   preferGpu: boolean = true,
 ): UseDetectorResult {
   const model = MODELS[variant] ?? MODELS["nano-416"];
-  const modelAsset = model.asset;
   const inputSize = model.size;
+
+  // PRECISION FOLLOWS THE DELEGATE. Measured on-device (Pixel-class Android,
+  // nano @416, mean over ~50 frames each):
+  //
+  //             CPU      GPU
+  //   fp32     237ms     52ms
+  //   fp16     282ms      -      slowest on CPU: dequantized to fp32 to compute
+  //   int8dr   158ms      -      fastest on CPU
+  //
+  // GPU fp32 is 3x faster than the best CPU option and saturates the 10 FPS cap,
+  // at the cost of a ~3.7s one-time delegate compile. On CPU the ordering
+  // reverses and int8dr wins, because ARM has dedicated int8 dot-product
+  // instructions. Shipping one precision for both paths therefore leaves roughly
+  // a third of the performance on the table whichever one is picked.
+  //
+  // NOTE this inverts the DESKTOP benchmark, where int8dr measured 0.73x (i.e.
+  // slower) on the same nano. x86 XNNPACK gets no equivalent int8 speedup, so
+  // the quantize/dequantize overhead dominates there. Desktop numbers do not
+  // predict mobile for quantization -- always confirm on device.
+  const modelAsset =
+    (preferGpu ? model.assetGpu : model.assetCpu) ?? model.asset;
 
   // channelOrder MUST be "bgr", not "rgb".
   //
@@ -306,6 +365,28 @@ export function useDetectorYoloXNanoPoop(
     if (modelHook.state !== "loaded" || resizerState.state !== "ready")
       return null;
 
+    // The loaded model must actually BE the one this variant asked for.
+    //
+    // `inputSize` comes from the variant and updates the instant the user picks
+    // a different model, but `modelHook.model` keeps serving the PREVIOUS cached
+    // model until the new asset finishes loading -- around 2s for the 34 MB
+    // s@1024 export. In that window the detector was being built for 1024x1024
+    // while holding a 416x416 model, and the frame processor fed it 1024-sized
+    // tensors. Observed in a device log as a "1024x1024 input" detector printing
+    // `images[1,416,416,3]`, followed by an impossibly fast 77ms frame.
+    //
+    // It self-corrected once the load completed, so it never showed up as a
+    // crash -- just a couple of frames of nonsense. Gate on the real shape.
+    const modelInput = modelHook.model.inputs?.[0];
+    const modelSize = modelInput?.shape?.[1];
+    if (typeof modelSize === "number" && modelSize !== inputSize) {
+      console.log(
+        `[ModelLoader] ⏳ stale model still cached (${modelSize}px) while ${variant} ` +
+          `wants ${inputSize}px -- waiting for the right one`,
+      );
+      return null;
+    }
+
     console.log(`[ModelLoader] ✅ Model fully ready in ${elapsed}ms total`);
     console.log(
       `[PoopDetector] Creating poop detector - 1 class, ${inputSize}x${inputSize} ` +
@@ -322,5 +403,40 @@ export function useDetectorYoloXNanoPoop(
     detect,
     meta: { labels: COCO_LABELS },
     ready: modelHook.state === "loaded" && resizerState.state === "ready",
+  };
+}
+
+/**
+ * Resolve a variant to the concrete asset + contract, for callers that are NOT
+ * the live frame processor -- currently app/media.tsx.
+ *
+ * Exists so the photo screen and the camera screen cannot drift apart. Before
+ * this, media.tsx hardcoded `yolox_nano_poop_cropped_only_best_float32.tflite`
+ * and decoded it with its own copy of the maths, so the detector picker on the
+ * camera screen had no effect whatsoever on what ran after the shutter -- and
+ * that hardcoded model is the weakest one measured (F1 0.471 vs 0.902 for v3,
+ * 39.2% false alarms on indoor photos vs 0.1%).
+ */
+export function resolvePoopModel(
+  variant: PoopModelVariant,
+  preferGpu: boolean,
+): {
+  asset: number;
+  size: number;
+  confThr: number;
+  note: string;
+  /** true for exports produced by tools/yolox_to_tflite.py (decoded boxes,
+   *  [0,1] input); false for the 2024-era exports and shitspotter's. */
+  newContract: boolean;
+} {
+  const model = MODELS[variant] ?? MODELS["nano-416"];
+  const asset =
+    (preferGpu ? model.assetGpu : model.assetCpu) ?? model.asset;
+  return {
+    asset,
+    size: model.size,
+    confThr: model.confThr,
+    note: model.note,
+    newContract: model.newContract !== false,
   };
 }

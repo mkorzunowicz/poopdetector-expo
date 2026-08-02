@@ -9,11 +9,13 @@ import {
 } from "react-native";
 
 import { LanguageSelector } from "@/components/LanguageSelector";
+import { useAutoSam } from "@/hooks/useAutoSam";
 import { tr } from "@/i18n/i18n";
 
 export default function SettingsScreen() {
   const { theme, currentTheme, toggleTheme } = useTheme();
   const styles = getStyles(theme);
+  const [autoSam, setAutoSam] = useAutoSam();
 
   return (
     <View style={styles.container}>
@@ -51,6 +53,52 @@ export default function SettingsScreen() {
                   styles.toggleThumb,
                   currentTheme === 'dark' && styles.toggleThumbActive
                 ]} />
+              </View>
+            </View>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* Detection Section */}
+      <View style={styles.menuSection}>
+        <Text style={styles.sectionTitle}>{tr("Settings.detection")}</Text>
+        <View style={styles.sectionContainer}>
+          <TouchableOpacity
+            style={styles.menuItem}
+            onPress={() => setAutoSam(!autoSam)}
+          >
+            <View style={styles.menuItemLeft}>
+              <View style={styles.iconContainer}>
+                <Ionicons
+                  name={autoSam ? "scan" : "scan-outline"}
+                  size={20}
+                  color={theme.colors.textPrimary}
+                />
+              </View>
+              <View style={styles.menuItemContent}>
+                <Text style={styles.menuItemTitle}>
+                  {tr("Settings.autoSam")}
+                </Text>
+                <Text style={styles.menuItemSubtitle}>
+                  {autoSam
+                    ? tr("Settings.autoSamOn")
+                    : tr("Settings.autoSamOff")}
+                </Text>
+              </View>
+            </View>
+            <View style={styles.themeToggle}>
+              <View
+                style={[
+                  styles.toggleTrack,
+                  autoSam && styles.toggleTrackActive,
+                ]}
+              >
+                <View
+                  style={[
+                    styles.toggleThumb,
+                    autoSam && styles.toggleThumbActive,
+                  ]}
+                />
               </View>
             </View>
           </TouchableOpacity>

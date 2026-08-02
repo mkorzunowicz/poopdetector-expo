@@ -308,6 +308,16 @@ function rawPixelsToRgbFloatDataResampled(
   // MobileSAMLoader._patch_mobilesam_for_qnn_comatibility), so it needs 1/255.
   // YOLOX keeps the default 1 (raw 0-255), which is its proven working range.
   pixelScale = 1,
+  // YOLOX is BGR end to end: preproc() never calls cvtColor, it feeds
+  // cv2.imread output (BGR) straight through with only a HWC->CHW transpose. So
+  // the network was trained, validated and exported in BGR. Measured on one real
+  // tile through poop_s_640: RGB -> max obj*cls 0.0245 / 0 detections;
+  // BGR -> 0.8662 / 8 detections. A 35x difference, and it does not degrade
+  // gracefully -- at any sane threshold RGB detects nothing at all.
+  //
+  // Left defaulting to RGB so the SAM encoder path (which genuinely wants RGB)
+  // is untouched; the YOLOX callers pass swapRedBlue = true.
+  swapRedBlue = false,
 ): Float32Array {
   const bytes = new Uint8Array(raw.buffer);
   const sourceWidth = raw.width;
@@ -332,11 +342,12 @@ function rawPixelsToRgbFloatDataResampled(
       );
       const sourceIndex = (sourceY * sourceWidth + sourceX) * stride;
       const targetIndex = (targetY * targetWidth + targetX) * 3;
-      output[targetIndex] = (bytes[sourceIndex + redIndex] ?? 0) * pixelScale;
+      const first = swapRedBlue ? blueIndex : redIndex;
+      const last = swapRedBlue ? redIndex : blueIndex;
+      output[targetIndex] = (bytes[sourceIndex + first] ?? 0) * pixelScale;
       output[targetIndex + 1] =
         (bytes[sourceIndex + greenIndex] ?? 0) * pixelScale;
-      output[targetIndex + 2] =
-        (bytes[sourceIndex + blueIndex] ?? 0) * pixelScale;
+      output[targetIndex + 2] = (bytes[sourceIndex + last] ?? 0) * pixelScale;
     }
   }
 
@@ -445,30 +456,77 @@ function calcUnionArea(a: Detection, b: Detection): number {
   return width * height;
 }
 
+/**
+ * Contract of a YOLOX export. The two generations in this app differ on both
+ * axes, and decoding one with the other's assumptions produces confident
+ * nonsense rather than an error:
+ *
+ *   OLD (yolox_nano_poop_cropped_only, shitspotter): raw grid offsets, [0,255]
+ *   NEW (poop_nano_416_v2, poop_s1024_v3):           decoded px, [0,1]
+ *
+ * `alreadySigmoid` is true for BOTH generations -- YOLOXHead activates obj/cls
+ * inside the graph regardless of --decode. Applying sigmoid again squeezes every
+ * score into ~[0.25, 0.53], which is what this file used to do.
+ */
+export interface YoloxContract {
+  /** boxes are cx,cy,w,h in input pixels; false = raw grid offsets */
+  decoded: boolean;
+  /** obj/cls already passed through sigmoid inside the graph */
+  alreadySigmoid: boolean;
+  /** model expects BGR channel order (all YOLOX exports here do) */
+  bgr: boolean;
+  /** 1 for [0,255] models, 1/255 for [0,1] models */
+  pixelScale: number;
+}
+
+export const OLD_CONTRACT: YoloxContract = {
+  decoded: false,
+  alreadySigmoid: true,
+  bgr: true,
+  pixelScale: 1,
+};
+
+export const NEW_CONTRACT: YoloxContract = {
+  decoded: true,
+  alreadySigmoid: true,
+  bgr: true,
+  pixelScale: 1 / 255,
+};
+
 function generateBoundingBoxProposals(
   modelOutput: Float32Array,
   gridCoords: GridCoordinate[],
   numClasses: number,
   confidenceThreshold: number,
   netSize: number,
+  contract: YoloxContract = OLD_CONTRACT,
 ): Detection[] {
   const proposalLength = numClasses + YOLOX_NUM_BBOX_FIELDS;
   const proposals: Detection[] = [];
+  const sigmoid = (v: number) =>
+    v > 0 ? 1 / (1 + Math.exp(-v)) : Math.exp(v) / (1 + Math.exp(v));
+  const activate = (v: number) => (contract.alreadySigmoid ? v : sigmoid(v));
 
   for (let anchorIndex = 0; anchorIndex < gridCoords.length; anchorIndex += 1) {
     const grid = gridCoords[anchorIndex]!;
     const startIndex = anchorIndex * proposalLength;
 
-    const centerX = (modelOutput[startIndex]! + grid.x) * grid.stride;
-    const centerY = (modelOutput[startIndex + 1]! + grid.y) * grid.stride;
-    const width = Math.exp(modelOutput[startIndex + 2]!) * grid.stride;
-    const height = Math.exp(modelOutput[startIndex + 3]!) * grid.stride;
+    // Decoded exports emit final pixel coordinates; old ones emit grid offsets
+    // that still need the anchor walk and exp().
+    const centerX = contract.decoded
+      ? modelOutput[startIndex]!
+      : (modelOutput[startIndex]! + grid.x) * grid.stride;
+    const centerY = contract.decoded
+      ? modelOutput[startIndex + 1]!
+      : (modelOutput[startIndex + 1]! + grid.y) * grid.stride;
+    const width = contract.decoded
+      ? modelOutput[startIndex + 2]!
+      : Math.exp(modelOutput[startIndex + 2]!) * grid.stride;
+    const height = contract.decoded
+      ? modelOutput[startIndex + 3]!
+      : Math.exp(modelOutput[startIndex + 3]!) * grid.stride;
 
-    const rawObjectness = modelOutput[startIndex + 4]!;
-    const boxObjectness =
-      rawObjectness > 0
-        ? 1.0 / (1.0 + Math.exp(-rawObjectness))
-        : Math.exp(rawObjectness) / (1.0 + Math.exp(rawObjectness));
+    const boxObjectness = activate(modelOutput[startIndex + 4]!);
 
     if (boxObjectness < 0.15) continue;
     if (proposals.length >= 50 && boxObjectness < 0.3) continue;
@@ -476,12 +534,9 @@ function generateBoundingBoxProposals(
     let bestProb = 0;
     let bestClassIndex = 0;
     for (let classIndex = 0; classIndex < numClasses; classIndex += 1) {
-      const rawClassScore =
-        modelOutput[startIndex + YOLOX_NUM_BBOX_FIELDS + classIndex]!;
-      const boxClassScore =
-        rawClassScore > 0
-          ? 1.0 / (1.0 + Math.exp(-rawClassScore))
-          : Math.exp(rawClassScore) / (1.0 + Math.exp(rawClassScore));
+      const boxClassScore = activate(
+        modelOutput[startIndex + YOLOX_NUM_BBOX_FIELDS + classIndex]!,
+      );
       const boxProb = boxObjectness * boxClassScore;
       if (boxProb > bestProb) {
         bestProb = boxProb;
@@ -527,6 +582,7 @@ function postprocessYoloX(
   numClasses: number,
   confThr: number,
   nmsThr: number,
+  contract: YoloxContract = OLD_CONTRACT,
 ): Detection[] {
   const proposals = generateBoundingBoxProposals(
     tensor,
@@ -534,6 +590,7 @@ function postprocessYoloX(
     numClasses,
     confThr,
     width,
+    contract,
   );
   const picked: Detection[] = [];
 
@@ -702,11 +759,15 @@ export function detectPoopInPhoto(
     numClasses = 1,
     confThr = 0.4,
     nmsThr = 0.45,
+    contract = OLD_CONTRACT,
   }: {
     inputSize?: number;
     numClasses?: number;
     confThr?: number;
     nmsThr?: number;
+    /** MUST match the export. See YoloxContract -- a mismatch does not error, it
+     *  silently produces confident boxes in meaningless places. */
+    contract?: YoloxContract;
   } = {},
 ): Detection[] {
   const cropRect = getCoverCropRect(
@@ -720,6 +781,8 @@ export function detectPoopInPhoto(
     resized.toRawPixelData() as RawPixelDataLike,
     inputSize,
     inputSize,
+    contract.pixelScale,
+    contract.bgr,
   );
   const output = model.runSync([toExactArrayBuffer(inputData)]);
   const tensor = new Float32Array(output[0]!);
@@ -730,6 +793,7 @@ export function detectPoopInPhoto(
     numClasses,
     confThr,
     nmsThr,
+    contract,
   ).map((detection) =>
     mapDetectionFromCropToOriginal(
       detection,
