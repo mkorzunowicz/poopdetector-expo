@@ -239,6 +239,13 @@ const MODELS: Record<
 export function useDetectorYoloXNanoPoop(
   variant: PoopModelVariant,
   preferGpu: boolean = true,
+  /**
+   * Overrides the model's own confThr. The camera screen passes a LOW floor and
+   * filters the results with its confidence slider instead, so the threshold can
+   * be changed without rebuilding the detector (which would reload the model).
+   * Lowering it here costs a little NMS work per frame and nothing else.
+   */
+  confThrOverride?: number,
 ): UseDetectorResult {
   const model = MODELS[variant] ?? MODELS["nano-416"];
   const inputSize = model.size;
@@ -390,14 +397,23 @@ export function useDetectorYoloXNanoPoop(
     console.log(`[ModelLoader] ✅ Model fully ready in ${elapsed}ms total`);
     console.log(
       `[PoopDetector] Creating poop detector - 1 class, ${inputSize}x${inputSize} ` +
-        `input, conf ${model.confThr} (${variant})`,
+        `input, conf ${confThrOverride ?? model.confThr}` +
+        `${confThrOverride != null ? ` (floor; UI filters above)` : ""} (${variant})`,
     );
     return createYoloXNanoDetector(modelHook.model, resizerState.resizer, {
       size: inputSize,
-      confThr: model.confThr,
+      confThr: confThrOverride ?? model.confThr,
       numClasses: 1,
     });
-  }, [inputSize, model.confThr, variant, loadStartTime, modelHook, resizerState]);
+  }, [
+    inputSize,
+    model.confThr,
+    confThrOverride,
+    variant,
+    loadStartTime,
+    modelHook,
+    resizerState,
+  ]);
 
   return {
     detect,

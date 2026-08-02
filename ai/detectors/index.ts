@@ -64,10 +64,17 @@ const VARIANT_BY_NAME: Record<DetectorName, PoopModelVariant> = {
 export function useDetector(
   name: DetectorName,
   preferGpu: boolean = true,
+  /** Optional floor passed straight through -- see useDetectorYoloXNanoPoop.
+   *  The camera screen sets a low value and filters with its slider instead. */
+  confThrOverride?: number,
 ): UseDetectorResult {
   // Single hook call with a variant argument -- NOT a switch over several hooks.
   // Calling a different hook per branch would violate the rules of hooks the
   // moment the user changes the selection at runtime, which is exactly what the
   // picker on the camera screen does.
-  return useDetectorYoloXNanoPoop(VARIANT_BY_NAME[name] ?? "nano-416", preferGpu);
+  return useDetectorYoloXNanoPoop(
+    VARIANT_BY_NAME[name] ?? "nano-416",
+    preferGpu,
+    confThrOverride,
+  );
 }

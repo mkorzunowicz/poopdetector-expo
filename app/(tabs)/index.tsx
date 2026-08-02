@@ -49,6 +49,8 @@ import { useTensorflowModelSlot } from "@/ai/tfliteModelCache";
 import { useFocusEffect } from "@react-navigation/core";
 
 import { CaptureButton } from "@/components/buttons/CaptureButton";
+import { ConfidenceSlider } from "@/components/ConfidenceSlider";
+import { useMMKVNumber } from "react-native-mmkv";
 import { useIsForeground } from "@/hooks/useIsForeground";
 import { usePreferredCameraDevice } from "@/hooks/usePreferredCameraDevice";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
@@ -317,9 +319,50 @@ const CameraPage: React.FC = () => {
 
   /* ──────────────────────────────────────────────────────────────────── */
   /*  Shared detections state that the overlay will render               */
-  const [detections, setDetections] = useState<Detection[]>([]);
 
-  const { detect, ready } = useDetector(selected, detectorUseGpu);
+  /**
+   * Live confidence threshold, persisted so it survives a reload.
+   *
+   * The DETECTOR runs at DETECTION_FLOOR and this filters what gets drawn, so
+   * dragging re-filters the current frame instantly instead of rebuilding the
+   * detector (which reloads the model, ~0.1-3.7s depending on delegate).
+   *
+   * Field report 2026-08-02: real poop was very seldom detected outdoors while
+   * false positives were essentially absent -- i.e. the operating point was far
+   * too conservative for the live path. Measured whole-frame on
+   * benchmark_shared, v3 goes from recall 0.373 at conf 0.50 to 0.641 at 0.20,
+   * so the useful range here is well below the tiled-mode defaults.
+   *
+   * Declared before the detections state below because that useMemo reads it in
+   * its dependency array, which is evaluated during render.
+   */
+  // 0.05 rather than 0.1 so the slider can answer a diagnostic question:
+  // field-testing on 2026-08-02 found that weathered/dried specimens were missed
+  // at EVERY distance from 0.1m to 15m, while fresh ones were found at every
+  // distance. A scale-invariant failure is not a scale problem -- it means the
+  // model scores those specimens near zero rather than merely below threshold.
+  // Dropping the slider to the floor distinguishes the two: if they appear at
+  // 0.05-0.10 it is calibration and the threshold can fix it; if nothing appears
+  // even here, the score really is ~0 and only training data will help.
+  const DETECTION_FLOOR = 0.05;
+  const [storedConf, setStoredConf] = useMMKVNumber("detector.confThreshold");
+  const confThreshold = storedConf ?? 0.3;
+
+  // RAW = everything above DETECTION_FLOOR. Filtering happens at render so the
+  // slider is instant; storing only the filtered set would freeze the last frame
+  // until the next inference (3-10 FPS).
+  const [rawDetections, setRawDetections] = useState<Detection[]>([]);
+  const detections = useMemo(
+    () => rawDetections.filter((d) => d.score >= confThreshold),
+    [rawDetections, confThreshold],
+  );
+  const hiddenCount = rawDetections.length - detections.length;
+
+  const { detect, ready } = useDetector(
+    selected,
+    detectorUseGpu,
+    DETECTION_FLOOR,
+  );
 
   /**
    * SAM prefetch master switch -- OFF while benchmarking detectors.
@@ -453,7 +496,7 @@ const CameraPage: React.FC = () => {
       console.log(
         "[Camera] Camera inactive - clearing detections and pausing processing",
       );
-      setDetections([]);
+      setRawDetections([]);
       detectionTimesRef.current = [];
       setDetectionFpsHistory([]);
       setLastDetectionTimeMs(null);
@@ -476,7 +519,7 @@ const CameraPage: React.FC = () => {
 
   const onDetectionCompleted = useCallback(
     (nextDetections: Detection[], detectionTimeMs: number) => {
-      setDetections(nextDetections);
+      setRawDetections(nextDetections);
       setLastDetectionTimeMs(detectionTimeMs);
 
       detectionTimesRef.current.push(detectionTimeMs);
@@ -727,6 +770,27 @@ const CameraPage: React.FC = () => {
         ))}
       </View>
 
+      {/* Confidence threshold -- sits above the capture button so it is
+          reachable one-handed. Filters what is drawn; the detector itself runs
+          at DETECTION_FLOOR, so lowering this reveals detections that were
+          already computed rather than triggering new work. */}
+      <View
+        style={[
+          styles.confidenceSlider,
+          { bottom: insets.bottom + CONTENT_SPACING + 96 },
+        ]}
+      >
+        <ConfidenceSlider
+          value={confThreshold}
+          onChange={setStoredConf}
+          min={DETECTION_FLOOR}
+          max={0.9}
+          step={0.05}
+          detectionCount={detections.length}
+          hiddenCount={hiddenCount}
+        />
+      </View>
+
       {/* Detection FPS Graph */}
       {detectionFpsHistory.length > 0 && (
         <View style={styles.detectionFpsGraph}>
@@ -844,6 +908,11 @@ const styles = StyleSheet.create({
   captureButton: {
     position: "absolute",
     alignSelf: "center",
+  },
+  confidenceSlider: {
+    position: "absolute",
+    left: CONTENT_SPACING + 8,
+    right: CONTENT_SPACING + 8,
   },
   button: {
     marginBottom: CONTENT_SPACING,
